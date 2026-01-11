@@ -1,2 +1,2 @@
-# mars
+# MARS
 Mass Accuracy Recalibration System
