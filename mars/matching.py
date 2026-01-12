@@ -1,0 +1,470 @@
+"""Fragment matching between spectral library and DIA spectra.
+
+Matches expected fragment m/z values from the library to observed peaks
+in DIA MS2 spectra, calculating delta m/z for calibration training.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Iterator
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+
+from mars.library import LibraryEntry
+from mars.mzml import DIASpectrum
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class FragmentMatch:
+    """A matched fragment with all calibration features."""
+
+    # Library values (ground truth)
+    expected_mz: float
+    library_intensity: float  # For weighting
+
+    # Measured values
+    observed_mz: float
+    observed_intensity: float
+    delta_mz: float  # observed - expected
+
+    # Features for calibration model
+    precursor_mz: float  # Center of DIA isolation window
+    fragment_mz: float  # Same as expected_mz (for convenience)
+    fragment_charge: int
+    rt: float  # Retention time in minutes
+    tic: float  # Spectrum total ion current
+
+    # Metadata
+    peptide_sequence: str
+    ion_annotation: str  # e.g., "y7+1"
+    scan_number: int
+
+
+def find_most_intense_peak(
+    target_mz: float,
+    mz_array: np.ndarray,
+    intensity_array: np.ndarray,
+    tolerance: float,
+    min_intensity: float = 0.0,
+) -> tuple[float, float] | None:
+    """Find the most intense peak within tolerance of target m/z.
+
+    Args:
+        target_mz: Expected m/z value
+        mz_array: Array of observed m/z values (sorted)
+        intensity_array: Array of observed intensities
+        tolerance: Maximum allowed delta m/z
+        min_intensity: Minimum intensity threshold
+
+    Returns:
+        Tuple of (observed_mz, intensity) or None if no match
+    """
+    if len(mz_array) == 0:
+        return None
+
+    # Find range of indices within tolerance using binary search
+    low_mz = target_mz - tolerance
+    high_mz = target_mz + tolerance
+
+    low_idx = np.searchsorted(mz_array, low_mz, side="left")
+    high_idx = np.searchsorted(mz_array, high_mz, side="right")
+
+    if low_idx >= high_idx:
+        return None
+
+    # Get peaks within tolerance
+    candidate_intensities = intensity_array[low_idx:high_idx]
+    candidate_mz = mz_array[low_idx:high_idx]
+
+    # Apply minimum intensity filter
+    if min_intensity > 0:
+        mask = candidate_intensities >= min_intensity
+        if not np.any(mask):
+            return None
+        candidate_intensities = candidate_intensities[mask]
+        candidate_mz = candidate_mz[mask]
+
+    if len(candidate_intensities) == 0:
+        return None
+
+    # Return the most intense peak
+    best_idx = np.argmax(candidate_intensities)
+    return float(candidate_mz[best_idx]), float(candidate_intensities[best_idx])
+
+
+def load_rt_ranges_from_prism(
+    prism_csv: Path | str,
+    file_name_filter: str | None = None,
+) -> dict[str, tuple[float, float]]:
+    """Load RT start/end ranges from PRISM Skyline report CSV.
+
+    Args:
+        prism_csv: Path to PRISM CSV file with Start Time and End Time columns
+        file_name_filter: Optional filter to match specific File Name or Replicate Name.
+                         Matches against Replicate Name, File Name (without .raw),
+                         or checks if the filter contains the Replicate Name.
+
+    Returns:
+        Dict mapping peptide key (modified_sequence + charge) to (rt_start, rt_end)
+    """
+    logger.info(f"Loading RT ranges from PRISM CSV: {prism_csv}")
+
+    df = pd.read_csv(prism_csv)
+    original_len = len(df)
+
+    # Filter by file name if specified
+    if file_name_filter:
+        # Strip common suffixes from filter for flexible matching
+        filter_clean = file_name_filter
+        for suffix in ["_uncalibrated", "_calibrated", "-mars", ".mzML", ".mzml"]:
+            filter_clean = filter_clean.replace(suffix, "")
+
+        matched = False
+
+        # Try Replicate Name column first (most reliable - unique portion of filename)
+        if "Replicate Name" in df.columns:
+            # Check if any Replicate Name is contained in the mzML filename
+            mask = df["Replicate Name"].apply(
+                lambda x: str(x) in file_name_filter or str(x) in filter_clean
+            )
+            if mask.any():
+                df = df[mask]
+                matched = True
+                logger.info(
+                    f"Matched {len(df)} rows via Replicate Name "
+                    f"('{df['Replicate Name'].iloc[0]}' in '{file_name_filter}')"
+                )
+
+        # Fall back to File Name column
+        if not matched and "File Name" in df.columns:
+            # Extract base names without extensions
+            df_filenames = df["File Name"].str.replace(".raw", "", regex=False)
+
+            # Check for partial match (filter contains filename or vice versa)
+            mask = df_filenames.apply(lambda x: filter_clean in str(x) or str(x) in filter_clean)
+            if mask.any():
+                df = df[mask]
+                matched = True
+                logger.info(f"Matched {len(df)} rows via File Name partial match")
+
+        if not matched:
+            logger.warning(
+                f"No matches found for '{file_name_filter}' in PRISM CSV. "
+                f"Using all {original_len} rows."
+            )
+            df = pd.read_csv(prism_csv)  # Reset to full data
+        else:
+            logger.info(f"Filtered from {original_len} to {len(df)} rows")
+
+    # Required columns
+    required = [
+        "Peptide Modified Sequence Unimod Ids",
+        "Precursor Charge",
+        "Start Time",
+        "End Time",
+    ]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns in PRISM CSV: {missing}")
+
+    rt_ranges: dict[str, tuple[float, float]] = {}
+
+    for _, row in df.iterrows():
+        seq = row["Peptide Modified Sequence Unimod Ids"]
+        charge = int(row["Precursor Charge"])
+        start = row["Start Time"]
+        end = row["End Time"]
+
+        # Skip rows with missing RT values
+        if pd.isna(start) or pd.isna(end):
+            continue
+
+        key = f"{seq}_{charge}"
+
+        # If multiple entries, take the widest range
+        if key in rt_ranges:
+            existing_start, existing_end = rt_ranges[key]
+            start = min(start, existing_start)
+            end = max(end, existing_end)
+
+        rt_ranges[key] = (float(start), float(end))
+
+    logger.info(f"Loaded RT ranges for {len(rt_ranges)} peptides")
+    return rt_ranges
+
+
+def update_library_rt_ranges(
+    library: list[LibraryEntry],
+    rt_ranges: dict[str, tuple[float, float]],
+) -> int:
+    """Update library entries with RT ranges from PRISM CSV.
+
+    Args:
+        library: List of LibraryEntry objects
+        rt_ranges: Dict from load_rt_ranges_from_prism
+
+    Returns:
+        Number of entries updated
+    """
+    n_updated = 0
+    for entry in library:
+        key = entry.make_key()
+        if key in rt_ranges:
+            entry.rt_start, entry.rt_end = rt_ranges[key]
+            n_updated += 1
+
+    logger.info(f"Updated RT ranges for {n_updated}/{len(library)} library entries")
+    return n_updated
+
+
+def match_library_to_spectra(
+    library: list[LibraryEntry],
+    spectra: Iterator[DIASpectrum],
+    mz_tolerance: float = 0.7,
+    min_intensity: float = 500.0,
+    min_rt: float | None = None,
+    max_rt: float | None = None,
+    show_progress: bool = True,
+) -> pd.DataFrame:
+    """Match library fragments to measured spectra within RT and precursor windows.
+
+    Algorithm:
+    1. For each spectrum, find library peptides where:
+       - RT is within library RT window (if available)
+       - Precursor m/z window overlaps library precursor
+    2. For each candidate peptide's fragments:
+       - Find the MOST INTENSE peak within tolerance (not closest)
+       - Filter by minimum intensity threshold
+       - Record delta m/z and all calibration features
+
+    Args:
+        library: List of LibraryEntry objects with expected fragments
+        spectra: Iterator of DIASpectrum objects from mzML
+        mz_tolerance: Maximum delta m/z for matching (default: ±0.7 Th)
+        min_intensity: Minimum observed intensity to use (default: 500)
+        min_rt: Minimum RT to process (minutes)
+        max_rt: Maximum RT to process (minutes)
+        show_progress: Show progress bar
+
+    Returns:
+        DataFrame with one row per matched fragment
+    """
+    logger.info(
+        f"Matching library fragments with tolerance ±{mz_tolerance} Th, min intensity {min_intensity}"
+    )
+
+    # Build precursor index for efficient lookup
+    # Group library entries by precursor m/z bins
+    precursor_bins: dict[int, list[LibraryEntry]] = {}
+    bin_width = 30  # Th bins for precursor lookup
+
+    for entry in library:
+        bin_idx = int(entry.precursor_mz / bin_width)
+        if bin_idx not in precursor_bins:
+            precursor_bins[bin_idx] = []
+        precursor_bins[bin_idx].append(entry)
+
+    logger.info(f"Indexed {len(library)} library entries into {len(precursor_bins)} precursor bins")
+
+    matches: list[dict] = []
+    n_spectra = 0
+    n_matched_fragments = 0
+    matched_peptide_keys: set[str] = set()  # Track unique peptides matched
+    precursor_ranges_seen: set[tuple[int, int]] = set()  # Track DIA windows seen
+
+    # Process spectra
+    spectra_iter = (
+        tqdm(spectra, desc="Matching spectra", unit="spectra", delay=0.5)
+        if show_progress
+        else spectra
+    )
+
+    for spectrum in spectra_iter:
+        n_spectra += 1
+
+        # RT filter
+        if min_rt is not None and spectrum.rt < min_rt:
+            continue
+        if max_rt is not None and spectrum.rt > max_rt:
+            continue
+
+        # Find candidate library entries
+        # Check bins that could overlap with isolation window
+        low_bin = int(spectrum.precursor_mz_low / bin_width)
+        high_bin = int(spectrum.precursor_mz_high / bin_width)
+
+        # Track which DIA window we're in
+        precursor_ranges_seen.add((int(spectrum.precursor_mz_low), int(spectrum.precursor_mz_high)))
+
+        candidates: list[LibraryEntry] = []
+        for bin_idx in range(low_bin, high_bin + 1):
+            if bin_idx in precursor_bins:
+                for entry in precursor_bins[bin_idx]:
+                    # Check if precursor falls within isolation window
+                    if (
+                        spectrum.precursor_mz_low
+                        <= entry.precursor_mz
+                        <= spectrum.precursor_mz_high
+                    ):
+                        # Check RT window if available
+                        if entry.rt_start is not None and entry.rt_end is not None:
+                            if not (entry.rt_start <= spectrum.rt <= entry.rt_end):
+                                continue
+                        candidates.append(entry)
+
+        if not candidates:
+            continue
+
+        # Match fragments from candidate peptides
+        for entry in candidates:
+            for fragment in entry.fragments:
+                # Skip fragments with unknown m/z
+                if fragment.mz <= 0:
+                    continue
+
+                # Find most intense peak within tolerance
+                result = find_most_intense_peak(
+                    fragment.mz,
+                    spectrum.mz_array,
+                    spectrum.intensity_array,
+                    mz_tolerance,
+                    min_intensity,
+                )
+
+                if result is None:
+                    continue
+
+                observed_mz, observed_intensity = result
+                delta_mz = observed_mz - fragment.mz
+
+                # Create match record
+                ion_annotation = f"{fragment.ion_type}{fragment.ion_number}+{fragment.charge}"
+
+                matches.append(
+                    {
+                        "expected_mz": fragment.mz,
+                        "library_intensity": fragment.intensity,
+                        "observed_mz": observed_mz,
+                        "observed_intensity": observed_intensity,
+                        "delta_mz": delta_mz,
+                        "precursor_mz": spectrum.precursor_mz_center,
+                        "fragment_mz": fragment.mz,
+                        "fragment_charge": fragment.charge,
+                        "rt": spectrum.rt,
+                        "tic": spectrum.tic,
+                        "peptide_sequence": entry.modified_sequence,
+                        "ion_annotation": ion_annotation,
+                        "scan_number": spectrum.scan_number,
+                    }
+                )
+
+                n_matched_fragments += 1
+                matched_peptide_keys.add(entry.make_key())
+
+    # Detailed logging
+    logger.info(f"Matched {n_matched_fragments:,} fragments from {n_spectra:,} spectra")
+    logger.info(f"  Unique peptides matched: {len(matched_peptide_keys):,} / {len(library):,}")
+
+    # Log precursor ranges seen
+    if precursor_ranges_seen:
+        ranges_str = ", ".join(f"{lo}-{hi}" for lo, hi in sorted(precursor_ranges_seen))
+        logger.info(f"  DIA windows in file: {ranges_str}")
+
+        # Count library entries that fall in these ranges
+        entries_in_range = sum(
+            1
+            for e in library
+            if any(lo <= e.precursor_mz <= hi for lo, hi in precursor_ranges_seen)
+        )
+        logger.info(f"  Library entries in precursor range: {entries_in_range:,}")
+
+    df = pd.DataFrame(matches)
+
+    if len(df) > 0:
+        logger.info("Delta m/z statistics:")
+        logger.info(f"  Mean:   {df['delta_mz'].mean():.4f} Th")
+        logger.info(f"  Median: {df['delta_mz'].median():.4f} Th")
+        logger.info(f"  Std:    {df['delta_mz'].std():.4f} Th")
+
+        # Intensity-weighted statistics
+        weights = df["observed_intensity"].values
+        weighted_mean = np.average(df["delta_mz"].values, weights=weights)
+        logger.info(f"  Intensity-weighted mean: {weighted_mean:.4f} Th")
+
+    return df
+
+
+def filter_matches(
+    matches: pd.DataFrame,
+    max_delta_mz: float | None = None,
+    min_intensity: float | None = None,
+    min_library_intensity: float | None = None,
+) -> pd.DataFrame:
+    """Filter fragment matches by quality criteria.
+
+    Args:
+        matches: DataFrame from match_library_to_spectra
+        max_delta_mz: Maximum absolute delta m/z to keep
+        min_intensity: Minimum observed intensity
+        min_library_intensity: Minimum library intensity
+
+    Returns:
+        Filtered DataFrame
+    """
+    df = matches.copy()
+    n_orig = len(df)
+
+    if max_delta_mz is not None:
+        df = df[df["delta_mz"].abs() <= max_delta_mz]
+
+    if min_intensity is not None:
+        df = df[df["observed_intensity"] >= min_intensity]
+
+    if min_library_intensity is not None:
+        df = df[df["library_intensity"] >= min_library_intensity]
+
+    n_filtered = len(df)
+    logger.info(
+        f"Filtered matches: {n_orig} -> {n_filtered} ({n_filtered / n_orig * 100:.1f}% kept)"
+    )
+
+    return df
+
+
+def apply_calibration_to_matches(
+    matches: pd.DataFrame,
+    calibrator,
+) -> pd.DataFrame:
+    """Apply calibration model to recalculate delta m/z.
+
+    Used to assess calibration quality with before/after comparison.
+
+    Args:
+        matches: DataFrame with fragment matches
+        calibrator: MzCalibrator with trained model
+
+    Returns:
+        DataFrame with updated delta_mz_calibrated column
+    """
+    df = matches.copy()
+
+    # Get predictions
+    corrections = calibrator.predict(
+        fragment_mz=df["fragment_mz"].values,
+        rt=df["rt"].values,
+        tic=df["tic"].values,
+        intensity=df["observed_intensity"].values,
+    )
+
+    # Apply corrections
+    df["delta_mz_calibrated"] = df["delta_mz"] - corrections
+    df["mz_correction"] = corrections
+
+    return df
