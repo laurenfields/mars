@@ -1,5 +1,9 @@
 # MARS: Mass Accuracy Recalibration System
 
+[![PyPI version](https://img.shields.io/pypi/v/mars-ms.svg)](https://pypi.org/project/mars-ms/)
+[![Python versions](https://img.shields.io/pypi/pyversions/mars-ms.svg)](https://pypi.org/project/mars-ms/)
+[![License](https://img.shields.io/pypi/l/mars-ms.svg)](https://github.com/maccoss/mars/blob/main/LICENSE)
+
 Mass recalibration tool for DIA mass spectrometry data from the ThermoFisher Stellar.
 
 ## Overview
@@ -27,6 +31,14 @@ Mars learns m/z calibration corrections from spectral library fragment matches. 
 4. **Calibration**: The trained model predicts m/z corrections for all peaks in the mzML
 
 ## Installation
+
+### From PyPI (recommended)
+
+```bash
+pip install mars-ms
+```
+
+### From source
 
 ```bash
 git clone https://github.com/maccoss/mars.git
@@ -187,4 +199,4 @@ calibrator.save("model.pkl")
 
 ## License
 
-Apache 2.0
+MIT
