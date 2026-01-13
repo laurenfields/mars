@@ -6,12 +6,16 @@ Initial release of Mars (Mass Accuracy Recalibration System), a mass calibration
 
 ## Features
 
-### XGBoost Calibration Model
 Mars uses a machine learning approach to predict m/z corrections based on:
 - **Fragment m/z**: Mass-dependent calibration bias
 - **Peak intensity**: Higher intensity peaks provide more reliable calibration
-- **Retention time**: Calibration drift over the LC gradient
+- **Absolute time**: Calibration drift over the acquisition run
 - **Spectrum TIC**: Space charge effects from high ion current
+- **Ion injection time**: Signal accumulation duration effects
+- **Precursor m/z**: DIA isolation window-specific effects
+- **Adjacent ion population**: Ion density in neighboring m/z ranges (0-1, 1-2, 2-3 Th above)
+- **Adjacent ion ratios**: Relative ion density (adjacent ions / fragment ions)
+- **RF temperatures**: Thermal effects from RF amplifier (RFA2) and electronics (RFC2)
 
 ### Fragment Matching
 - Matches library peptides to DIA MS2 spectra using precursor m/z and RT windows
@@ -30,6 +34,7 @@ Mars uses a machine learning approach to predict m/z corrections based on:
 Generated quality control outputs include:
 - Delta m/z distribution histogram with MAD and RMS statistics (before/after calibration)
 - 2D heatmap visualization (RT × m/z, color = delta)
+- Hexbin density plots (intensity, RT, m/z, injection time, TIC, fragment ions vs mass error)
 - Model feature importance plot
 - Calibration statistics summary
 
@@ -67,4 +72,4 @@ pip install mars-ms==0.1.0
 
 ## License
 
-Apache 2.0
+MIT

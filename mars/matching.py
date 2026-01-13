@@ -42,7 +42,14 @@ class FragmentMatch:
     log_tic: float  # Log10 of spectrum total ion current
     log_intensity: float  # Log10 of peak intensity
     injection_time: float | None  # Ion injection time in seconds (optional)
-    tic_injection_time: float | None  # TIC * injection_time (optional, only if injection_time available)
+    tic_injection_time: (
+        float | None
+    )  # TIC * injection_time (optional, only if injection_time available)
+
+    # Adjacent ion population features (intensity × injection_time for ions just above this m/z)
+    ions_above_0_1: float | None  # Total ions in (X, X+1] Th
+    ions_above_1_2: float | None  # Total ions in (X+1, X+2] Th
+    ions_above_2_3: float | None  # Total ions in (X+2, X+3] Th
 
     # Metadata
     peptide_sequence: str
@@ -100,6 +107,39 @@ def find_most_intense_peak(
     # Return the most intense peak
     best_idx = np.argmax(candidate_intensities)
     return float(candidate_mz[best_idx]), float(candidate_intensities[best_idx])
+
+
+def sum_intensity_in_range(
+    mz_array: np.ndarray,
+    intensity_array: np.ndarray,
+    low_mz: float,
+    high_mz: float,
+) -> float:
+    """Sum intensities in an m/z range (exclusive low, inclusive high).
+
+    Uses binary search for efficient range finding on sorted m/z arrays.
+
+    Args:
+        mz_array: Array of observed m/z values (must be sorted ascending)
+        intensity_array: Array of observed intensities
+        low_mz: Lower bound (exclusive) - peaks at exactly low_mz are NOT included
+        high_mz: Upper bound (inclusive) - peaks at exactly high_mz ARE included
+
+    Returns:
+        Sum of intensities for peaks in the range (low_mz, high_mz]
+    """
+    if len(mz_array) == 0:
+        return 0.0
+
+    # Find indices: low exclusive (use 'right' to exclude low_mz),
+    # high inclusive (use 'right' to include high_mz)
+    low_idx = np.searchsorted(mz_array, low_mz, side="right")
+    high_idx = np.searchsorted(mz_array, high_mz, side="right")
+
+    if low_idx >= high_idx:
+        return 0.0
+
+    return float(np.sum(intensity_array[low_idx:high_idx]))
 
 
 def load_rt_ranges_from_prism(
@@ -385,13 +425,52 @@ def match_library_to_spectra(
                 rfc2_temp = None
                 if temperature_data is not None:
                     if "RFA2" in temperature_data:
-                        rfa2_temp = temperature_data["RFA2"].get_temperature_at_time(
-                            spectrum.rt
-                        )
+                        rfa2_temp = temperature_data["RFA2"].get_temperature_at_time(spectrum.rt)
                     if "RFC2" in temperature_data:
-                        rfc2_temp = temperature_data["RFC2"].get_temperature_at_time(
-                            spectrum.rt
+                        rfc2_temp = temperature_data["RFC2"].get_temperature_at_time(spectrum.rt)
+
+                # Calculate adjacent ion population features
+                # For measured m/z = X, sum intensity in ranges above X and multiply by injection_time
+                ions_above_0_1 = None
+                ions_above_1_2 = None
+                ions_above_2_3 = None
+                if spectrum.injection_time is not None:
+                    # Use observed_mz as X (the measured position in the spectrum)
+                    x = observed_mz
+                    # (X, X+1] range
+                    ions_above_0_1 = (
+                        sum_intensity_in_range(
+                            spectrum.mz_array, spectrum.intensity_array, x, x + 1.0
                         )
+                        * spectrum.injection_time
+                    )
+                    # (X+1, X+2] range
+                    ions_above_1_2 = (
+                        sum_intensity_in_range(
+                            spectrum.mz_array, spectrum.intensity_array, x + 1.0, x + 2.0
+                        )
+                        * spectrum.injection_time
+                    )
+                    # (X+2, X+3] range
+                    ions_above_2_3 = (
+                        sum_intensity_in_range(
+                            spectrum.mz_array, spectrum.intensity_array, x + 2.0, x + 3.0
+                        )
+                        * spectrum.injection_time
+                    )
+
+                # Calculate ratio features (adjacent ions / fragment ions)
+                # These capture relative adjacent ion population compared to the fragment signal
+                adjacent_ratio_0_1 = None
+                adjacent_ratio_1_2 = None
+                adjacent_ratio_2_3 = None
+                if fragment_ions is not None and fragment_ions > 0:
+                    if ions_above_0_1 is not None:
+                        adjacent_ratio_0_1 = ions_above_0_1 / fragment_ions
+                    if ions_above_1_2 is not None:
+                        adjacent_ratio_1_2 = ions_above_1_2 / fragment_ions
+                    if ions_above_2_3 is not None:
+                        adjacent_ratio_2_3 = ions_above_2_3 / fragment_ions
 
                 # Create match record
                 ion_annotation = f"{fragment.ion_type}{fragment.ion_number}+{fragment.charge}"
@@ -412,6 +491,12 @@ def match_library_to_spectra(
                         "injection_time": spectrum.injection_time,
                         "tic_injection_time": tic_injection_time,
                         "fragment_ions": fragment_ions,
+                        "ions_above_0_1": ions_above_0_1,
+                        "ions_above_1_2": ions_above_1_2,
+                        "ions_above_2_3": ions_above_2_3,
+                        "adjacent_ratio_0_1": adjacent_ratio_0_1,
+                        "adjacent_ratio_1_2": adjacent_ratio_1_2,
+                        "adjacent_ratio_2_3": adjacent_ratio_2_3,
                         "rfa2_temp": rfa2_temp,
                         "rfc2_temp": rfc2_temp,
                         "rt": spectrum.rt,

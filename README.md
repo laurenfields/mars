@@ -1,6 +1,6 @@
-# Mars: Mass Accuracy Recalibration System
+# MARS: Mass Accuracy Recalibration System
 
-Mass recalibration tool for Thermo Stellar unit resolution DIA mass spectrometry data.
+Mass recalibration tool for DIA mass spectrometry data from the ThermoFisher Stellar.
 
 ## Overview
 
@@ -40,7 +40,7 @@ pip install -e .
 
 ### With PRISM CSV (Recommended)
 
-Use a PRISM Skyline report CSV for accurate RT windows:
+Use a CSV file created using this [Skyline report](Skyline-PRISM-Report/Skyline-PRISM.skyr) for accurate RT windows:
 
 ```bash
 mars calibrate \
@@ -48,7 +48,7 @@ mars calibrate \
   --prism-csv prism_
   report.csv \
   --tolerance 0.2 \
-  --min-intensity 1500 \
+  --min-intensity 500 \
   --max-isolation-window 5.0 \
   --output-dir output/
 ```
@@ -75,7 +75,7 @@ mars calibrate --mzml-dir /path/to/data/ --library library.blib --output-dir out
 |--------|---------|-------------|
 | `--mzml` | - | Path to mzML file or glob pattern |
 | `--mzml-dir` | - | Directory containing mzML files |
-| `--library` | - | Path to blib spectral library (required) |
+| `--library` | - | Path to blib spectral library (ignored if using PRISM Skyline Report) |
 | `--prism-csv` | - | PRISM Skyline CSV with Start/End Time columns |
 | `--tolerance` | 0.7 | m/z tolerance for matching (Th) |
 | `--min-intensity` | 500 | Minimum peak intensity for matching |
@@ -114,7 +114,7 @@ This filters spectra during both model training and mzML recalibration. Typical 
 
 ## Model Features
 
-The XGBoost model uses up to 9 features to predict m/z corrections:
+The XGBoost model uses up to 16 features to predict m/z corrections:
 
 1. `precursor_mz` - DIA isolation window center
 2. `fragment_mz` - Fragment m/z being calibrated  
@@ -124,10 +124,16 @@ The XGBoost model uses up to 9 features to predict m/z corrections:
 6. `injection_time` - Ion injection time (seconds)
 7. `tic_injection_time` - TIC × injection time product
 8. `fragment_ions` - Fragment intensity × injection time (total ions, not rate)
-9. `rfa2_temp` - RF amplifier temperature (°C)
-10. `rfc2_temp` - RF electronics temperature (°C)
+9. `ions_above_0_1` - Total ions in (X, X+1] Th range above fragment m/z
+10. `ions_above_1_2` - Total ions in (X+1, X+2] Th range above fragment m/z
+11. `ions_above_2_3` - Total ions in (X+2, X+3] Th range above fragment m/z
+12. `adjacent_ratio_0_1` - ions_above_0_1 / fragment_ions (relative adjacent density)
+13. `adjacent_ratio_1_2` - ions_above_1_2 / fragment_ions
+14. `adjacent_ratio_2_3` - ions_above_2_3 / fragment_ions
+15. `rfa2_temp` - RF amplifier temperature (°C)
+16. `rfc2_temp` - RF electronics temperature (°C)
 
-**Note**: Features 6-8 are only included if injection time data is available in the mzML files. Features 9-10 are only included if temperature CSV files are provided. Features with universally missing data are automatically excluded.
+**Note**: Features 6-14 are only included if injection time data is available in the mzML files. Features 15-16 are only included if temperature CSV files are provided. Features with universally missing data are automatically excluded.
 
 ## RF Temperature Data
 

@@ -58,6 +58,12 @@ class MzCalibrator:
             "injection_time",
             "tic_injection_time",
             "fragment_ions",
+            "ions_above_0_1",
+            "ions_above_1_2",
+            "ions_above_2_3",
+            "adjacent_ratio_0_1",
+            "adjacent_ratio_1_2",
+            "adjacent_ratio_2_3",
             "rfa2_temp",
             "rfc2_temp",
         ]
@@ -80,8 +86,9 @@ class MzCalibrator:
                      injection_time, tic_injection_time
 
         Returns:
-            Tuple of (feature_matrix, active_feature_names) where active_feature_names
-            may be a subset of self.feature_names if some features are unavailable
+            Tuple of (feature_matrix, active_feature_names, filtered_df) where active_feature_names
+            may be a subset of self.feature_names if some features are unavailable,
+            and filtered_df is the DataFrame after dropping rows with NaN values
         """
         df = matches.copy()
 
@@ -120,6 +127,9 @@ class MzCalibrator:
                     f"Dropped {n_before - n_after} rows with missing injection_time "
                     f"({n_after} rows retained)"
                 )
+                # Update feature_data for already-added features after row filtering
+                for feat in active_features:
+                    feature_data[feat] = df[feat].values
 
             active_features.append("injection_time")
             feature_data["injection_time"] = df["injection_time"].values
@@ -157,8 +167,46 @@ class MzCalibrator:
 
                 active_features.append("fragment_ions")
                 feature_data["fragment_ions"] = df["fragment_ions"].values
+
+            # Check adjacent ion population features (only if injection_time is available)
+            for ions_col in ["ions_above_0_1", "ions_above_1_2", "ions_above_2_3"]:
+                if ions_col in df.columns and df[ions_col].notna().any():
+                    if df[ions_col].isna().any():
+                        n_before = len(df)
+                        df = df.dropna(subset=[ions_col])
+                        n_after = len(df)
+                        logger.info(
+                            f"Dropped {n_before - n_after} rows with missing {ions_col} "
+                            f"({n_after} rows retained)"
+                        )
+                        # Update feature_data for already-added features after row filtering
+                        for feat in active_features:
+                            feature_data[feat] = df[feat].values
+
+                    active_features.append(ions_col)
+                    feature_data[ions_col] = df[ions_col].values
+
+            # Check adjacent ratio features (only if fragment_ions is available)
+            for ratio_col in ["adjacent_ratio_0_1", "adjacent_ratio_1_2", "adjacent_ratio_2_3"]:
+                if ratio_col in df.columns and df[ratio_col].notna().any():
+                    if df[ratio_col].isna().any():
+                        n_before = len(df)
+                        df = df.dropna(subset=[ratio_col])
+                        n_after = len(df)
+                        logger.info(
+                            f"Dropped {n_before - n_after} rows with missing {ratio_col} "
+                            f"({n_after} rows retained)"
+                        )
+                        # Update feature_data for already-added features after row filtering
+                        for feat in active_features:
+                            feature_data[feat] = df[feat].values
+
+                    active_features.append(ratio_col)
+                    feature_data[ratio_col] = df[ratio_col].values
         else:
-            logger.info("injection_time not available in all spectra - skipping injection_time features")
+            logger.info(
+                "injection_time not available in all spectra - skipping injection_time features"
+            )
 
         # Check temperature features availability
         for temp_col in ["rfa2_temp", "rfc2_temp"]:
@@ -189,7 +237,7 @@ class MzCalibrator:
 
         logger.info(f"Using {len(active_features)} features: {active_features}")
 
-        return X, active_features
+        return X, active_features, df
 
     def fit(
         self,
@@ -215,13 +263,13 @@ class MzCalibrator:
         logger.info(f"Training XGBoost calibration model on {len(matches)} matches")
 
         # Prepare features (this also updates self.feature_names based on availability)
-        X, active_features = self._prepare_features(matches)
-        y = matches["delta_mz"].values
+        X, active_features, filtered_matches = self._prepare_features(matches)
+        y = filtered_matches["delta_mz"].values
 
         # Optional sample weights
         sample_weight = None
-        if sample_weight_col and sample_weight_col in matches.columns:
-            sample_weight = matches[sample_weight_col].values
+        if sample_weight_col and sample_weight_col in filtered_matches.columns:
+            sample_weight = filtered_matches[sample_weight_col].values
             # Normalize weights
             sample_weight = sample_weight / sample_weight.mean()
 
@@ -279,9 +327,7 @@ class MzCalibrator:
 
         # Feature importance
         importance = self.model.feature_importances_
-        self.training_stats["feature_importance"] = dict(
-            zip(active_features, importance.tolist())
-        )
+        self.training_stats["feature_importance"] = dict(zip(active_features, importance.tolist()))
 
         logger.info("Training complete:")
         logger.info(f"  Train MAE: {self.training_stats['train_mae']:.4f} Th")
@@ -320,7 +366,7 @@ class MzCalibrator:
 
         if matches is not None:
             # Use DataFrame interface
-            X, _ = self._prepare_features(matches)
+            X, _, _ = self._prepare_features(matches)
         else:
             # Legacy interface: build feature matrix from kwargs
             if not self.feature_names:
