@@ -26,7 +26,7 @@ Mars learns m/z calibration corrections from spectral library fragment matches. 
 
 2. **Peak selection**: For each expected fragment, Mars selects the **most intense** peak within the m/z tolerance (not the closest), filtering for minimum intensity
 
-3. **Model training**: Each matched fragment becomes a training point with features: `[precursor_mz, fragment_mz, absolute_time, log_tic, log_intensity, injection_time, tic_injection_time, rfa2_temp, rfc2_temp]` and target: `delta_mz`
+3. **Model training**: Each matched fragment becomes a training point with up to 16 features (see [Model Features](#model-features)) and target: `delta_mz`
 
 4. **Calibration**: The trained model predicts m/z corrections for all peaks in the mzML
 
@@ -119,10 +119,20 @@ This filters spectra during both model training and mzML recalibration. Typical 
 |------|-------------|
 | `{input}-mars.mzML` | Recalibrated mzML file |
 | `mars_model.pkl` | Trained XGBoost calibration model |
-| `mars_qc_histogram.png` | Delta m/z distribution with MAD and RMS statistics (before/after) |
+| `mars_qc_histogram.png` | Delta m/z distribution (before/after) |
 | `mars_qc_heatmap.png` | 2D heatmap (RT × m/z, color = delta) |
+| `mars_qc_intensity_vs_error.png` | Intensity vs mass error hexbin |
+| `mars_qc_rt_vs_error.png` | RT vs mass error hexbin |
+| `mars_qc_mz_vs_error.png` | Fragment m/z vs mass error hexbin |
+| `mars_qc_tic_vs_error.png` | TIC vs mass error hexbin |
+| `mars_qc_injection_time_vs_error.png` | Injection time vs mass error hexbin |
+| `mars_qc_tic_injection_time_vs_error.png` | TIC×injection time vs mass error hexbin |
+| `mars_qc_fragment_ions_vs_error.png` | Fragment ions vs mass error hexbin |
+| `mars_qc_rfa2_temperature_vs_error.png` | RFA2 temperature vs error (if available) |
+| `mars_qc_rfc2_temperature_vs_error.png` | RFC2 temperature vs error (if available) |
 | `mars_qc_feature_importance.png` | Model feature importance |
 | `mars_qc_summary.txt` | Calibration statistics |
+
 
 ## Model Features
 
