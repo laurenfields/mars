@@ -183,7 +183,7 @@ def read_dia_spectra(
         DIASpectrum objects for each matching spectrum
     """
     import re
-    
+
     mzml_path = Path(mzml_path)
     logger.info(f"Reading DIA spectra from {mzml_path}")
 
@@ -193,12 +193,12 @@ def read_dia_spectra(
     n_spectra = 0
     n_yielded = 0
     acquisition_start_time = None
-    
+
     # Extract startTimeStamp from the <run> element before processing spectra
     try:
-        with open(mzml_path, 'r', encoding='utf-8') as f:
+        with open(mzml_path, encoding="utf-8") as f:
             for line_num, line in enumerate(f):
-                if 'startTimeStamp' in line:
+                if "startTimeStamp" in line:
                     match = re.search(r'startTimeStamp="([^"]+)"', line)
                     if match:
                         timestamp_str = match.group(1)
@@ -211,7 +211,7 @@ def read_dia_spectra(
                     break
     except Exception as e:
         logger.debug(f"Failed to extract startTimeStamp: {e}")
-    
+
     if acquisition_start_time is None:
         logger.info("No acquisition start time found in mzML, will use RT as absolute time")
 
@@ -266,7 +266,7 @@ def read_dia_spectra(
             else:
                 # Fallback: use RT converted to seconds
                 absolute_time = rt * 60.0
-            
+
             # Normalize to min_absolute_time if provided
             if min_absolute_time is not None:
                 absolute_time = absolute_time - min_absolute_time
@@ -323,7 +323,7 @@ def write_calibrated_mzml(
 
     # Extract startTimeStamp from the file (for absolute_time calculation)
     acquisition_start_time = None
-    with open(input_path, "r", encoding="utf-8", errors="ignore") as f:
+    with open(input_path, encoding="utf-8", errors="ignore") as f:
         for line in f:
             if "<run" in line and "startTimeStamp" in line:
                 match = re.search(r'startTimeStamp="([^"]+)"', line)
@@ -339,14 +339,15 @@ def write_calibrated_mzml(
 
     # Find namespace
     ns = {"ms": root.nsmap.get(None, "http://psi.hupo.org/ms/mzml")}
+    ns_ms = ns["ms"]  # Helper for f-strings
 
     n_calibrated = 0
 
     # Find all spectrum elements
-    for spectrum in root.iter("{%s}spectrum" % ns["ms"]):
+    for spectrum in root.iter(f"{{{ns_ms}}}spectrum"):
         # Get MS level
         ms_level = 1
-        for cv_param in spectrum.iter("{%s}cvParam" % ns["ms"]):
+        for cv_param in spectrum.iter(f"{{{ns_ms}}}cvParam"):
             if cv_param.get("name") == "ms level":
                 ms_level = int(cv_param.get("value", 1))
                 break
@@ -362,8 +363,8 @@ def write_calibrated_mzml(
         precursor_mz_high = 0.0
         tic = 0.0
 
-        for scan in spectrum.iter("{%s}scan" % ns["ms"]):
-            for cv_param in scan.iter("{%s}cvParam" % ns["ms"]):
+        for scan in spectrum.iter(f"{{{ns_ms}}}scan"):
+            for cv_param in scan.iter(f"{{{ns_ms}}}cvParam"):
                 name = cv_param.get("name", "")
                 if name == "scan start time":
                     rt = float(cv_param.get("value", 0.0))
@@ -371,8 +372,8 @@ def write_calibrated_mzml(
                     # Convert ms to seconds
                     injection_time = float(cv_param.get("value", 0.0)) / 1000.0
 
-        for isolation in spectrum.iter("{%s}isolationWindow" % ns["ms"]):
-            for cv_param in isolation.iter("{%s}cvParam" % ns["ms"]):
+        for isolation in spectrum.iter(f"{{{ns_ms}}}isolationWindow"):
+            for cv_param in isolation.iter(f"{{{ns_ms}}}cvParam"):
                 name = cv_param.get("name", "")
                 if name == "isolation window target m/z":
                     precursor_mz = float(cv_param.get("value", 0.0))
@@ -384,12 +385,16 @@ def write_calibrated_mzml(
                     precursor_mz_high = precursor_mz + upper_offset
 
         # Skip spectra with wide isolation windows if max_isolation_window_width is set
-        if max_isolation_window_width is not None and precursor_mz_low > 0 and precursor_mz_high > 0:
+        if (
+            max_isolation_window_width is not None
+            and precursor_mz_low > 0
+            and precursor_mz_high > 0
+        ):
             window_width = precursor_mz_high - precursor_mz_low
             if window_width > max_isolation_window_width:
                 continue
 
-        for cv_param in spectrum.iter("{%s}cvParam" % ns["ms"]):
+        for cv_param in spectrum.iter(f"{{{ns_ms}}}cvParam"):
             if cv_param.get("name") == "total ion current":
                 tic = float(cv_param.get("value", 0.0))
 
@@ -411,29 +416,28 @@ def write_calibrated_mzml(
         mz_array = None
         intensity_array = None
         mz_binary_elem = None
-        mz_binary_array_elem = None
         mz_compressed = False
         mz_precision = 64
 
-        for binary_array in spectrum.iter("{%s}binaryDataArray" % ns["ms"]):
+        for binary_array in spectrum.iter(f"{{{ns_ms}}}binaryDataArray"):
             is_mz_array = False
             is_intensity_array = False
 
-            for cv_param in binary_array.iter("{%s}cvParam" % ns["ms"]):
+            for cv_param in binary_array.iter(f"{{{ns_ms}}}cvParam"):
                 if cv_param.get("name") == "m/z array":
                     is_mz_array = True
                 elif cv_param.get("name") == "intensity array":
                     is_intensity_array = True
 
             # Get binary element and settings
-            binary_elem = binary_array.find("{%s}binary" % ns["ms"])
+            binary_elem = binary_array.find(f"{{{ns_ms}}}binary")
             if binary_elem is None or not binary_elem.text:
                 continue
 
             compressed = False
             precision = 64
 
-            for cv_param in binary_array.iter("{%s}cvParam" % ns["ms"]):
+            for cv_param in binary_array.iter(f"{{{ns_ms}}}cvParam"):
                 name = cv_param.get("name", "")
                 if "zlib" in name.lower() or "compression" in name.lower():
                     compressed = True
@@ -454,7 +458,6 @@ def write_calibrated_mzml(
             if is_mz_array:
                 mz_array = arr
                 mz_binary_elem = binary_elem
-                mz_binary_array_elem = binary_array
                 mz_compressed = compressed
                 mz_precision = precision
             elif is_intensity_array:

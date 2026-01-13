@@ -100,7 +100,12 @@ class TestMzCalibrator:
         cal_func = calibrator.create_calibration_function()
 
         # Test with sample data
-        metadata = {"precursor_mz": 500.0, "tic": 1e7, "absolute_time": 100.0, "injection_time": 0.05}
+        metadata = {
+            "precursor_mz": 500.0,
+            "tic": 1e7,
+            "absolute_time": 100.0,
+            "injection_time": 0.05,
+        }
         mz_array = np.array([500.0, 600.0, 700.0])
         intensity_array = np.array([1000.0, 2000.0, 3000.0])
 
@@ -161,9 +166,7 @@ class TestMzCalibrator:
                 "log_tic": np.log10(np.random.uniform(1e6, 1e8, n)),
                 "log_intensity": np.log10(np.random.uniform(500, 10000, n)),
                 "injection_time": np.where(
-                    np.random.random(n) < 0.8,
-                    np.random.uniform(10, 150, n) / 1000.0,
-                    None
+                    np.random.random(n) < 0.8, np.random.uniform(10, 150, n) / 1000.0, None
                 ),
                 "tic": np.random.uniform(1e6, 1e8, n),
                 "tic_injection_time": None,  # Will be computed or None
@@ -172,8 +175,10 @@ class TestMzCalibrator:
         )
         # Add tic_injection_time where injection_time exists
         df["tic_injection_time"] = df.apply(
-            lambda row: row["tic"] * row["injection_time"] if row["injection_time"] is not None else None,
-            axis=1
+            lambda row: row["tic"] * row["injection_time"]
+            if row["injection_time"] is not None
+            else None,
+            axis=1,
         )
 
         n_before = len(df)
@@ -182,4 +187,3 @@ class TestMzCalibrator:
 
         # Check that injection_time IS included
         assert "injection_time" in calibrator.feature_names
-

@@ -70,7 +70,7 @@ def find_mzml_files(
 
 
 @click.group()
-@click.version_option(version="0.1.0", prog_name="mars")
+@click.version_option(version="0.1.1", prog_name="mars")
 def main():
     """Mars: Mass Accuracy Recalibration System for Thermo Stellar DIA data."""
     pass
@@ -281,11 +281,16 @@ def calibrate(
     logger.info(f"Total matches: {len(combined_matches):,}")
 
     # Normalize absolute_time across all files (subtract global minimum so first run starts at ~0)
-    if "absolute_time" in combined_matches.columns and combined_matches["absolute_time"].notna().any():
+    if (
+        "absolute_time" in combined_matches.columns
+        and combined_matches["absolute_time"].notna().any()
+    ):
         min_absolute_time = combined_matches["absolute_time"].min()
         combined_matches["absolute_time"] = combined_matches["absolute_time"] - min_absolute_time
         max_time = combined_matches["absolute_time"].max()
-        logger.info(f"Absolute time range: 0 to {max_time:.1f} seconds ({max_time/60:.1f} minutes)")
+        logger.info(
+            f"Absolute time range: 0 to {max_time:.1f} seconds ({max_time / 60:.1f} minutes)"
+        )
 
     # Train model
     logger.info("Training calibration model...")
@@ -317,9 +322,11 @@ def calibrate(
             # Get temperature data for this file
             temp_data = temperature_data_by_file.get(mzml_file.name)
             write_calibrated_mzml(
-                mzml_file, output_file, calibration_func, 
+                mzml_file,
+                output_file,
+                calibration_func,
                 max_isolation_window_width=max_isolation_window,
-                temperature_data=temp_data
+                temperature_data=temp_data,
             )
 
     logger.info("Done!")
@@ -357,6 +364,12 @@ def calibrate(
     help="m/z tolerance for fragment matching (Da)",
 )
 @click.option(
+    "--max-isolation-window",
+    type=float,
+    default=None,
+    help="Maximum isolation window width (m/z) to process. Skips wider windows in output",
+)
+@click.option(
     "-v",
     "--verbose",
     is_flag=True,
@@ -368,6 +381,7 @@ def qc(
     library: str,
     output: str,
     tolerance: float,
+    max_isolation_window: float | None,
     verbose: bool,
 ):
     """Generate QC report without recalibration.
@@ -512,7 +526,10 @@ def apply(
         output_file = get_output_path(mzml_file, output_path)
         logger.info(f"Calibrating: {mzml_file.name} -> {output_file.name}")
         write_calibrated_mzml(
-            mzml_file, output_file, calibration_func, max_isolation_window_width=max_isolation_window
+            mzml_file,
+            output_file,
+            calibration_func,
+            max_isolation_window_width=max_isolation_window,
         )
 
     logger.info("Done!")

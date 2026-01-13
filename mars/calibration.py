@@ -327,7 +327,9 @@ class MzCalibrator:
 
         # Feature importance
         importance = self.model.feature_importances_
-        self.training_stats["feature_importance"] = dict(zip(active_features, importance.tolist()))
+        self.training_stats["feature_importance"] = dict(
+            zip(active_features, importance.tolist(), strict=True)
+        )
 
         logger.info("Training complete:")
         logger.info(f"  Train MAE: {self.training_stats['train_mae']:.4f} Th")

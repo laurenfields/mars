@@ -103,7 +103,7 @@ def load_temperature_csv(csv_path: Path | str) -> TemperatureData | None:
 
     try:
         # Read the file and skip header lines
-        with open(csv_path, "r") as f:
+        with open(csv_path) as f:
             lines = f.readlines()
 
         # Find the header line (contains "Time")

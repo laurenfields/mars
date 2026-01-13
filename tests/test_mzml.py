@@ -146,4 +146,3 @@ class TestDIASpectrum:
         assert spectrum.injection_time is None
         assert spectrum.acquisition_start_time is None
         assert spectrum.absolute_time is None
-

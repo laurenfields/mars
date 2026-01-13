@@ -242,7 +242,7 @@ def load_blib(
         ref_spectra = cursor.fetchall()
         logger.info(f"Found {len(ref_spectra)} library entries")
 
-        for spec_id, pep_seq, prec_mz, prec_charge, mod_seq, rt, n_peaks in ref_spectra:
+        for spec_id, pep_seq, prec_mz, prec_charge, mod_seq, rt, _n_peaks in ref_spectra:
             seq = mod_seq if mod_seq else pep_seq
             stripped = strip_modifications(seq) if mod_seq else pep_seq
 
@@ -296,7 +296,7 @@ def load_blib(
                     annotations[peak_idx] = (name, charge)
 
             # Build fragments
-            for i, (mz, intensity) in enumerate(zip(mz_values, intensities)):
+            for i, (mz, intensity) in enumerate(zip(mz_values, intensities, strict=True)):
                 if i in annotations:
                     # Parse annotation like "b3" or "y7"
                     name, frag_charge = annotations[i]

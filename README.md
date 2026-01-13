@@ -57,8 +57,7 @@ Use a CSV file created using this [Skyline report](Skyline-PRISM-Report/Skyline-
 ```bash
 mars calibrate \
   --mzml data.mzML \
-  --prism-csv prism_
-  report.csv \
+  --prism-csv prism_report.csv \
   --tolerance 0.2 \
   --min-intensity 500 \
   --max-isolation-window 5.0 \

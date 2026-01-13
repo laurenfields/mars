@@ -143,7 +143,7 @@ def plot_delta_mz_histogram(
             transform=ax.transAxes,
             fontsize=10,
             verticalalignment="top",
-            bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+            bbox={"boxstyle": "round", "facecolor": "wheat", "alpha": 0.5},
         )
 
         return stats
@@ -312,7 +312,7 @@ def plot_feature_importance(
     ax.set_title("Calibration Model Feature Importance", fontsize=14, fontweight="bold")
 
     # Add value labels
-    for i, (f, v) in enumerate(zip(features, values)):
+    for i, (_f, v) in enumerate(zip(features, values, strict=True)):
         ax.text(v + 0.01, i, f"{v:.3f}", va="center", fontsize=10)
 
     plt.tight_layout()
