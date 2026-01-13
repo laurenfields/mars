@@ -66,6 +66,9 @@ def plot_delta_mz_histogram(
         else:
             wmean = np.mean(delta)
 
+        # Root mean square error
+        rms = np.sqrt(np.mean(delta**2))
+
         return {
             "median": median,
             "mad": mad,
@@ -74,6 +77,7 @@ def plot_delta_mz_histogram(
             "p75": p75,
             "wmean": wmean,
             "std": np.std(delta),
+            "rms": rms,
         }
 
     def make_histogram(
@@ -129,6 +133,7 @@ def plot_delta_mz_histogram(
             f"n = {len(delta):,}\n"
             f"Median = {stats['median']:.4f}\n"
             f"MAD = {stats['mad']:.4f}\n"
+            f"RMS = {stats['rms']:.4f}\n"
             f"Wt.Mean = {stats['wmean']:.4f}"
         )
         ax.text(
@@ -156,8 +161,11 @@ def plot_delta_mz_histogram(
         mad_improvement = (
             (1 - stats_after["mad"] / stats_before["mad"]) * 100 if stats_before["mad"] > 0 else 0
         )
+        rms_improvement = (
+            (1 - stats_after["rms"] / stats_before["rms"]) * 100 if stats_before["rms"] > 0 else 0
+        )
         fig.suptitle(
-            f"{title}\nMAD improved by {mad_improvement:.1f}%",
+            f"{title}\nMAD improved by {mad_improvement:.1f}%, RMS improved by {rms_improvement:.1f}%",
             fontsize=14,
             fontweight="bold",
         )
@@ -209,13 +217,16 @@ def plot_delta_mz_heatmap(
 
     def make_heatmap(df: pd.DataFrame, ax: plt.Axes, delta_col: str, subplot_title: str):
         """Create binned heatmap."""
+        # Use absolute_time if available, otherwise use rt
+        time_col = "absolute_time" if "absolute_time" in df.columns else "rt"
+        
         # Create bins
-        rt_edges = np.linspace(df["rt"].min(), df["rt"].max(), rt_bins + 1)
+        rt_edges = np.linspace(df[time_col].min(), df[time_col].max(), rt_bins + 1)
         mz_edges = np.linspace(df["fragment_mz"].min(), df["fragment_mz"].max(), mz_bins + 1)
 
         # Assign bins
         df = df.copy()
-        df["rt_bin"] = pd.cut(df["rt"], bins=rt_edges, labels=False, include_lowest=True)
+        df["rt_bin"] = pd.cut(df[time_col], bins=rt_edges, labels=False, include_lowest=True)
         df["mz_bin"] = pd.cut(df["fragment_mz"], bins=mz_edges, labels=False, include_lowest=True)
 
         # Aggregate by bins (median delta m/z)
@@ -234,7 +245,7 @@ def plot_delta_mz_heatmap(
             extent=[rt_edges[0], rt_edges[-1], mz_edges[0], mz_edges[-1]],
         )
 
-        ax.set_xlabel("Retention Time (min)", fontsize=12)
+        ax.set_xlabel("Acquisition Time (s)" if time_col == "absolute_time" else "Retention Time (min)", fontsize=12)
         ax.set_ylabel("Fragment m/z (Th)", fontsize=12)
         ax.set_title(subplot_title, fontsize=12)
 
@@ -399,12 +410,14 @@ def plot_rt_vs_error(
         ax_after = None
 
     def make_hexbin(df: pd.DataFrame, ax: plt.Axes, delta_col: str, subplot_title: str):
-        x = df["rt"].values
+        # Use absolute_time if available, otherwise use rt
+        time_col = "absolute_time" if "absolute_time" in df.columns else "rt"
+        x = df[time_col].values
         y = df[delta_col].values
 
         hb = ax.hexbin(x, y, gridsize=gridsize, cmap="hot_r", mincnt=1)
         ax.axhline(0, color="blue", linestyle="--", linewidth=1, alpha=0.7)
-        ax.set_xlabel("Retention Time (min)", fontsize=12)
+        ax.set_xlabel("Acquisition Time (s)" if time_col == "absolute_time" else "Retention Time (min)", fontsize=12)
         ax.set_ylabel("Delta m/z (Th)", fontsize=12)
         ax.set_ylim(ylim)
         ax.set_title(subplot_title, fontsize=12)
@@ -515,7 +528,11 @@ def plot_tic_vs_error(
         ax_after = None
 
     def make_hexbin(df: pd.DataFrame, ax: plt.Axes, delta_col: str, subplot_title: str):
-        x = np.log10(np.clip(df["tic"], 1, None))
+        # Use log_tic if available, otherwise calculate from tic
+        if "log_tic" in df.columns:
+            x = df["log_tic"].values
+        else:
+            x = np.log10(np.clip(df["tic"], 1, None))
         y = df[delta_col].values
 
         hb = ax.hexbin(x, y, gridsize=gridsize, cmap="hot_r", mincnt=1)
@@ -540,6 +557,263 @@ def plot_tic_vs_error(
         output_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(output_path, dpi=150, bbox_inches="tight")
         logger.info(f"Saved TIC vs error plot to {output_path}")
+
+    return fig
+
+
+def plot_injection_time_vs_error(
+    before: pd.DataFrame,
+    after: pd.DataFrame | None = None,
+    output_path: Path | str | None = None,
+    title: str = "Injection Time vs Mass Error",
+    ylim: tuple[float, float] = (-0.25, 0.25),
+    gridsize: int = 100,
+) -> plt.Figure:
+    """Plot 2D hexbin of injection time vs delta m/z.
+
+    Args:
+        before: DataFrame with 'injection_time' and 'delta_mz' columns
+        after: Optional DataFrame with 'delta_mz_calibrated' column
+        output_path: Path to save figure
+        title: Plot title
+        ylim: Y-axis limits for mass error
+        gridsize: Hexbin grid size
+
+    Returns:
+        Matplotlib Figure
+    """
+    if after is not None:
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        ax_before, ax_after = axes
+    else:
+        fig, ax_before = plt.subplots(1, 1, figsize=(8, 6))
+        ax_after = None
+
+    def make_hexbin(df: pd.DataFrame, ax: plt.Axes, delta_col: str, subplot_title: str):
+        # Use injection_time if available
+        if "injection_time" not in df.columns or df["injection_time"].isna().all():
+            ax.text(0.5, 0.5, "No injection time data", ha="center", va="center",
+                   transform=ax.transAxes, fontsize=12)
+            ax.set_title(subplot_title, fontsize=12)
+            return
+        
+        # Filter out NaN values
+        mask = ~df["injection_time"].isna() & ~df[delta_col].isna()
+        x = df.loc[mask, "injection_time"].values
+        y = df.loc[mask, delta_col].values
+        
+        # Calculate data range for x-axis
+        x_min, x_max = np.min(x), np.max(x)
+        x_range = x_max - x_min
+        padding = x_range * 0.05 if x_range > 0 else 0.001
+        
+        hb = ax.hexbin(x, y, gridsize=gridsize, cmap="viridis", mincnt=1, bins="log")
+        ax.axhline(0, color="white", linestyle="--", linewidth=1, alpha=0.7)
+        ax.set_xlabel("Ion Injection Time (s)", fontsize=12)
+        ax.set_ylabel("Delta m/z (Th)", fontsize=12)
+        ax.set_ylim(ylim)
+        ax.set_xlim(x_min - padding, x_max + padding)
+        ax.set_title(subplot_title, fontsize=12)
+        plt.colorbar(hb, ax=ax, label="Log10(Fragment count)")
+
+    make_hexbin(before, ax_before, "delta_mz", "Before Calibration")
+
+    if ax_after is not None and after is not None:
+        delta_col = "delta_mz_calibrated" if "delta_mz_calibrated" in after.columns else "delta_mz"
+        make_hexbin(after, ax_after, delta_col, "After Calibration")
+
+    fig.suptitle(title, fontsize=14, fontweight="bold")
+    plt.tight_layout()
+
+    if output_path:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        logger.info(f"Saved injection time vs error plot to {output_path}")
+
+    return fig
+
+
+def plot_tic_injection_time_vs_error(
+    before: pd.DataFrame,
+    after: pd.DataFrame | None = None,
+    output_path: Path | str | None = None,
+    title: str = "TIC×Injection Time vs Mass Error",
+    ylim: tuple[float, float] = (-0.25, 0.25),
+    gridsize: int = 100,
+) -> plt.Figure:
+    """Plot 2D hexbin of TIC×injection_time vs delta m/z.
+
+    Args:
+        before: DataFrame with 'tic_injection_time' and 'delta_mz' columns
+        after: Optional DataFrame with 'delta_mz_calibrated' column
+        output_path: Path to save figure
+        title: Plot title
+        ylim: Y-axis limits for mass error
+        gridsize: Hexbin grid size
+
+    Returns:
+        Matplotlib Figure
+    """
+    if after is not None:
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        ax_before, ax_after = axes
+    else:
+        fig, ax_before = plt.subplots(1, 1, figsize=(8, 6))
+        ax_after = None
+
+    def make_hexbin(df: pd.DataFrame, ax: plt.Axes, delta_col: str, subplot_title: str):
+        # Use tic_injection_time if available
+        if "tic_injection_time" not in df.columns or df["tic_injection_time"].isna().all():
+            ax.text(0.5, 0.5, "No TIC×injection time data", ha="center", va="center",
+                   transform=ax.transAxes, fontsize=12)
+            ax.set_title(subplot_title, fontsize=12)
+            return
+        
+        # Filter out NaN values
+        mask = ~df["tic_injection_time"].isna() & ~df[delta_col].isna()
+        x_raw = df.loc[mask, "tic_injection_time"].values
+        x = np.log10(np.clip(x_raw, 1, None))
+        y = df.loc[mask, delta_col].values
+        
+        # Calculate data range for x-axis
+        x_min, x_max = np.min(x), np.max(x)
+        x_range = x_max - x_min
+        padding = x_range * 0.05 if x_range > 0 else 0.05
+        
+        hb = ax.hexbin(x, y, gridsize=gridsize, cmap="viridis", mincnt=1, bins="log")
+        ax.axhline(0, color="white", linestyle="--", linewidth=1, alpha=0.7)
+        ax.set_xlabel("Log10(TIC×Injection Time)", fontsize=12)
+        ax.set_ylabel("Delta m/z (Th)", fontsize=12)
+        ax.set_ylim(ylim)
+        ax.set_xlim(x_min - padding, x_max + padding)
+        ax.set_title(subplot_title, fontsize=12)
+        plt.colorbar(hb, ax=ax, label="Log10(Fragment count)")
+
+    make_hexbin(before, ax_before, "delta_mz", "Before Calibration")
+
+    if ax_after is not None and after is not None:
+        delta_col = "delta_mz_calibrated" if "delta_mz_calibrated" in after.columns else "delta_mz"
+        make_hexbin(after, ax_after, delta_col, "After Calibration")
+
+    fig.suptitle(title, fontsize=14, fontweight="bold")
+    plt.tight_layout()
+
+    if output_path:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        logger.info(f"Saved TIC×injection time vs error plot to {output_path}")
+
+    return fig
+
+
+def plot_single_temperature_vs_error(
+    before: pd.DataFrame,
+    after: pd.DataFrame | None = None,
+    temp_col: str = "rfa2_temp",
+    temp_label: str = "RFA2 (RF Amplifier)",
+    output_path: Path | str | None = None,
+    title: str | None = None,
+    ylim: tuple[float, float] = (-0.25, 0.25),
+    gridsize: int = 100,
+) -> plt.Figure:
+    """Plot 2D hexbin of a single temperature feature vs delta m/z.
+
+    Args:
+        before: DataFrame with temperature column and 'delta_mz' columns
+        after: Optional DataFrame with 'delta_mz_calibrated' column
+        temp_col: Column name for temperature (e.g., 'rfa2_temp', 'rfc2_temp')
+        temp_label: Human-readable label for the temperature
+        output_path: Path to save figure
+        title: Plot title (defaults to "{temp_label} vs Mass Error")
+        ylim: Y-axis limits for mass error
+        gridsize: Hexbin grid size
+
+    Returns:
+        Matplotlib Figure
+    """
+    if title is None:
+        title = f"{temp_label} vs Mass Error"
+
+    # Check if temperature data is available
+    has_temp = temp_col in before.columns and before[temp_col].notna().any()
+
+    if not has_temp:
+        # No temperature data - create empty figure with message
+        fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+        ax.text(
+            0.5,
+            0.5,
+            f"No {temp_label} data available",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+            fontsize=14,
+        )
+        ax.set_title(title, fontsize=14, fontweight="bold")
+        if output_path:
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        return fig
+
+    # Create subplot layout
+    n_cols = 2 if after is not None else 1
+    fig, axes = plt.subplots(1, n_cols, figsize=(7 * n_cols, 5), squeeze=False)
+
+    def make_hexbin(
+        df: pd.DataFrame, ax: plt.Axes, delta_col: str, subplot_title: str
+    ):
+        mask = ~df[temp_col].isna() & ~df[delta_col].isna()
+        x = df.loc[mask, temp_col].values
+        y = df.loc[mask, delta_col].values
+
+        if len(x) == 0:
+            ax.text(
+                0.5,
+                0.5,
+                "No data",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+                fontsize=12,
+            )
+            ax.set_title(subplot_title, fontsize=12)
+            return
+
+        # Calculate data range for x-axis
+        x_min, x_max = np.min(x), np.max(x)
+        x_range = x_max - x_min
+        padding = x_range * 0.05 if x_range > 0 else 0.5
+
+        hb = ax.hexbin(x, y, gridsize=gridsize, cmap="viridis", mincnt=1, bins="log")
+        ax.axhline(0, color="white", linestyle="--", linewidth=1, alpha=0.7)
+        ax.set_xlabel(f"{temp_label} Temperature (°C)", fontsize=12)
+        ax.set_ylabel("Delta m/z (Th)", fontsize=12)
+        ax.set_ylim(ylim)
+        ax.set_xlim(x_min - padding, x_max + padding)
+        ax.set_title(subplot_title, fontsize=12)
+        plt.colorbar(hb, ax=ax, label="Log10(Fragment count)")
+
+    # Before calibration
+    make_hexbin(before, axes[0, 0], "delta_mz", "Before Calibration")
+
+    # After calibration
+    if after is not None:
+        delta_col = (
+            "delta_mz_calibrated" if "delta_mz_calibrated" in after.columns else "delta_mz"
+        )
+        make_hexbin(after, axes[0, 1], delta_col, "After Calibration")
+
+    fig.suptitle(title, fontsize=14, fontweight="bold")
+    plt.tight_layout()
+
+    if output_path:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        logger.info(f"Saved {temp_label} temperature vs error plot to {output_path}")
 
     return fig
 
@@ -603,6 +877,42 @@ def generate_qc_report(
     plot_tic_vs_error(before, after, tic_path)
     generated_files.append(tic_path)
     plt.close()
+
+    # Injection time vs error
+    injection_time_path = output_dir / f"{file_prefix}_injection_time_vs_error.png"
+    plot_injection_time_vs_error(before, after, injection_time_path)
+    generated_files.append(injection_time_path)
+    plt.close()
+
+    # TIC×Injection time vs error
+    tic_injection_time_path = output_dir / f"{file_prefix}_tic_injection_time_vs_error.png"
+    plot_tic_injection_time_vs_error(before, after, tic_injection_time_path)
+    generated_files.append(tic_injection_time_path)
+    plt.close()
+
+    # RFA2 Temperature vs error (if available)
+    if "rfa2_temp" in before.columns and before["rfa2_temp"].notna().any():
+        rfa2_path = output_dir / f"{file_prefix}_rfa2_temperature_vs_error.png"
+        plot_single_temperature_vs_error(
+            before, after, 
+            temp_col="rfa2_temp", 
+            temp_label="RFA2 (RF Amplifier)",
+            output_path=rfa2_path
+        )
+        generated_files.append(rfa2_path)
+        plt.close()
+
+    # RFC2 Temperature vs error (if available)
+    if "rfc2_temp" in before.columns and before["rfc2_temp"].notna().any():
+        rfc2_path = output_dir / f"{file_prefix}_rfc2_temperature_vs_error.png"
+        plot_single_temperature_vs_error(
+            before, after,
+            temp_col="rfc2_temp",
+            temp_label="RFC2 (RF Electronics)",
+            output_path=rfc2_path
+        )
+        generated_files.append(rfc2_path)
+        plt.close()
 
     # Feature importance
     if calibrator is not None and calibrator.training_stats:

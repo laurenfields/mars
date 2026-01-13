@@ -28,7 +28,7 @@ Mars uses a machine learning approach to predict m/z corrections based on:
 
 ### QC Reports
 Generated quality control outputs include:
-- Delta m/z distribution histogram (before/after calibration)
+- Delta m/z distribution histogram with MAD and RMS statistics (before/after calibration)
 - 2D heatmap visualization (RT × m/z, color = delta)
 - Model feature importance plot
 - Calibration statistics summary
@@ -39,7 +39,7 @@ Generated quality control outputs include:
 |------|-------------|
 | `{input}-mars.mzML` | Recalibrated mzML file |
 | `mars_model.pkl` | Trained XGBoost calibration model |
-| `mars_qc_histogram.png` | Delta m/z distribution (before/after) |
+| `mars_qc_histogram.png` | Delta m/z distribution with MAD and RMS (before/after) |
 | `mars_qc_heatmap.png` | 2D heatmap (RT × m/z, color = delta) |
 | `mars_qc_feature_importance.png` | Model feature importance |
 | `mars_qc_summary.txt` | Calibration statistics |

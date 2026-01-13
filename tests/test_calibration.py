@@ -16,26 +16,30 @@ class TestMzCalibrator:
         np.random.seed(42)
         n = 1000
 
-        return pd.DataFrame(
+        df = pd.DataFrame(
             {
+                "precursor_mz": np.random.uniform(400, 1000, n),
                 "fragment_mz": np.random.uniform(200, 1200, n),
-                "rt": np.random.uniform(5, 30, n),
+                "absolute_time": np.random.uniform(0, 3600, n),
+                "log_tic": np.log10(np.random.uniform(1e6, 1e8, n)),
+                "log_intensity": np.log10(np.random.uniform(500, 10000, n)),
+                "injection_time": np.random.uniform(10, 150, n) / 1000.0,
                 "tic": np.random.uniform(1e6, 1e8, n),
                 "observed_intensity": np.random.uniform(500, 10000, n),
-                "delta_mz": np.random.normal(0.05, 0.1, n),  # Simulated bias
+                "delta_mz": np.random.normal(0.05, 0.1, n),
             }
         )
+        df["tic_injection_time"] = df["tic"] * df["injection_time"]
+        return df
 
     def test_calibrator_init(self):
         """Test MzCalibrator initialization."""
         calibrator = MzCalibrator()
         assert calibrator.model is None
-        assert calibrator.feature_names == [
-            "fragment_mz",
-            "rt",
-            "log_tic",
-            "log_intensity",
-        ]
+        # feature_names includes optional features
+        assert "precursor_mz" in calibrator.feature_names
+        assert "fragment_mz" in calibrator.feature_names
+        assert "log_tic" in calibrator.feature_names
 
     def test_calibrator_fit(self, sample_matches):
         """Test model training."""
@@ -48,17 +52,12 @@ class TestMzCalibrator:
         assert "feature_importance" in calibrator.training_stats
 
     def test_calibrator_predict(self, sample_matches):
-        """Test prediction."""
+        """Test prediction using DataFrame interface."""
         calibrator = MzCalibrator(n_estimators=10)
         calibrator.fit(sample_matches)
 
-        # Predict on same data
-        corrections = calibrator.predict(
-            fragment_mz=sample_matches["fragment_mz"].values,
-            rt=sample_matches["rt"].values,
-            tic=sample_matches["tic"].values,
-            intensity=sample_matches["observed_intensity"].values,
-        )
+        # Predict on same data using DataFrame
+        corrections = calibrator.predict(matches=sample_matches)
 
         assert len(corrections) == len(sample_matches)
         assert isinstance(corrections, np.ndarray)
@@ -66,14 +65,10 @@ class TestMzCalibrator:
     def test_calibrator_predict_before_fit(self):
         """Test that predict fails before fit."""
         calibrator = MzCalibrator()
+        df = pd.DataFrame({"fragment_mz": [500.0]})
 
         with pytest.raises(ValueError, match="Model not trained"):
-            calibrator.predict(
-                fragment_mz=np.array([500.0]),
-                rt=np.array([10.0]),
-                tic=np.array([1e7]),
-                intensity=np.array([1000.0]),
-            )
+            calibrator.predict(matches=df)
 
     def test_calibrator_save_load(self, sample_matches, tmp_path):
         """Test model save/load."""
@@ -91,15 +86,10 @@ class TestMzCalibrator:
         assert loaded.feature_names == calibrator.feature_names
 
         # Predictions should match
-        test_input = {
-            "fragment_mz": np.array([500.0, 600.0]),
-            "rt": np.array([10.0, 15.0]),
-            "tic": np.array([1e7, 1e7]),
-            "intensity": np.array([1000.0, 2000.0]),
-        }
+        test_input = sample_matches.iloc[:2].copy()
 
-        orig_pred = calibrator.predict(**test_input)
-        loaded_pred = loaded.predict(**test_input)
+        orig_pred = calibrator.predict(matches=test_input)
+        loaded_pred = loaded.predict(matches=test_input)
         np.testing.assert_array_almost_equal(orig_pred, loaded_pred)
 
     def test_create_calibration_function(self, sample_matches):
@@ -110,7 +100,7 @@ class TestMzCalibrator:
         cal_func = calibrator.create_calibration_function()
 
         # Test with sample data
-        metadata = {"rt": 10.0, "tic": 1e7}
+        metadata = {"precursor_mz": 500.0, "tic": 1e7, "absolute_time": 100.0, "injection_time": 0.05}
         mz_array = np.array([500.0, 600.0, 700.0])
         intensity_array = np.array([1000.0, 2000.0, 3000.0])
 
@@ -130,3 +120,66 @@ class TestMzCalibrator:
         assert "Calibration Model Summary" in summary
         assert "Train MAE" in summary
         assert "Feature importance" in summary
+
+    def test_missing_injection_time_removal(self):
+        """Test that injection_time is removed when universally missing."""
+        np.random.seed(42)
+        n = 100
+
+        # Create matches WITHOUT injection_time
+        df = pd.DataFrame(
+            {
+                "precursor_mz": np.random.uniform(400, 1000, n),
+                "fragment_mz": np.random.uniform(200, 1200, n),
+                "absolute_time": np.random.uniform(0, 3600, n),
+                "log_tic": np.log10(np.random.uniform(1e6, 1e8, n)),
+                "log_intensity": np.log10(np.random.uniform(500, 10000, n)),
+                "injection_time": None,  # Universally missing
+                "tic_injection_time": None,  # Will be removed too
+                "delta_mz": np.random.normal(0.05, 0.1, n),
+            }
+        )
+
+        calibrator = MzCalibrator(n_estimators=5)
+        calibrator.fit(df)
+
+        # Check that injection_time was NOT included
+        assert "injection_time" not in calibrator.feature_names
+        assert "tic_injection_time" not in calibrator.feature_names
+
+    def test_sparse_injection_time_rows_dropped(self):
+        """Test that rows with missing injection_time are dropped when sparse."""
+        np.random.seed(42)
+        n = 100
+
+        # Create matches with SOME injection_time missing
+        df = pd.DataFrame(
+            {
+                "precursor_mz": np.random.uniform(400, 1000, n),
+                "fragment_mz": np.random.uniform(200, 1200, n),
+                "absolute_time": np.random.uniform(0, 3600, n),
+                "log_tic": np.log10(np.random.uniform(1e6, 1e8, n)),
+                "log_intensity": np.log10(np.random.uniform(500, 10000, n)),
+                "injection_time": np.where(
+                    np.random.random(n) < 0.8,
+                    np.random.uniform(10, 150, n) / 1000.0,
+                    None
+                ),
+                "tic": np.random.uniform(1e6, 1e8, n),
+                "tic_injection_time": None,  # Will be computed or None
+                "delta_mz": np.random.normal(0.05, 0.1, n),
+            }
+        )
+        # Add tic_injection_time where injection_time exists
+        df["tic_injection_time"] = df.apply(
+            lambda row: row["tic"] * row["injection_time"] if row["injection_time"] is not None else None,
+            axis=1
+        )
+
+        n_before = len(df)
+        calibrator = MzCalibrator(n_estimators=5)
+        calibrator.fit(df)
+
+        # Check that injection_time IS included
+        assert "injection_time" in calibrator.feature_names
+

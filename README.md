@@ -8,9 +8,11 @@ Mars learns m/z calibration corrections from spectral library fragment matches. 
 
 - **Fragment m/z**: Mass-dependent calibration bias
 - **Peak intensity**: Higher intensity peaks provide more reliable calibration
-- **Retention time**: Calibration drift over the LC gradient  
+- **Absolute time**: Calibration drift over the acquisition run
 - **Spectrum TIC**: Space charge effects from high ion current
-- **Precursor window**: DIA isolation window-specific effects
+- **Ion injection time**: Signal accumulation duration effects
+- **Precursor m/z**: DIA isolation window-specific effects
+- **RF temperatures**: Thermal effects from RF amplifier (RFA2) and electronics (RFC2)
 
 ## How It Works
 
@@ -20,7 +22,7 @@ Mars learns m/z calibration corrections from spectral library fragment matches. 
 
 2. **Peak selection**: For each expected fragment, Mars selects the **most intense** peak within the m/z tolerance (not the closest), filtering for minimum intensity
 
-3. **Model training**: Each matched fragment becomes a training point with features: `[precursor_mz, fragment_mz, rt, log_tic, log_intensity]` and target: `delta_mz`
+3. **Model training**: Each matched fragment becomes a training point with features: `[precursor_mz, fragment_mz, absolute_time, log_tic, log_intensity, injection_time, tic_injection_time, rfa2_temp, rfc2_temp]` and target: `delta_mz`
 
 4. **Calibration**: The trained model predicts m/z corrections for all peaks in the mzML
 
@@ -43,10 +45,11 @@ Use a PRISM Skyline report CSV for accurate RT windows:
 ```bash
 mars calibrate \
   --mzml data.mzML \
-  --library library.blib \
-  --prism-csv prism_report.csv \
+  --prism-csv prism_
+  report.csv \
   --tolerance 0.2 \
   --min-intensity 1500 \
+  --max-isolation-window 5.0 \
   --output-dir output/
 ```
 
@@ -76,6 +79,8 @@ mars calibrate --mzml-dir /path/to/data/ --library library.blib --output-dir out
 | `--prism-csv` | - | PRISM Skyline CSV with Start/End Time columns |
 | `--tolerance` | 0.7 | m/z tolerance for matching (Th) |
 | `--min-intensity` | 500 | Minimum peak intensity for matching |
+| `--max-isolation-window` | - | Maximum isolation window width (m/z) to include |
+| `--temperature-dir` | - | Directory with RF temperature CSV files |
 | `--output-dir` | `.` | Output directory |
 | `--model-path` | - | Path to save/load calibration model |
 | `--no-recalibrate` | - | Only train model, don't write mzML |
@@ -85,26 +90,72 @@ mars calibrate --mzml-dir /path/to/data/ --library library.blib --output-dir out
 - **With `--prism-csv`**: Uses exact `Start Time` and `End Time` from Skyline
 - **Without `--prism-csv`**: Uses ±5 seconds around the blib library RT
 
+## Isolation Window Filtering
+
+Some DIA methods use wide isolation windows (e.g., 20-30 m/z) that may reduce calibration accuracy. Use `--max-isolation-window` to exclude these:
+
+```bash
+# Exclude windows wider than 5 m/z
+mars calibrate --mzml data.mzML --prism-csv report.csv --max-isolation-window 5.0
+```
+
+This filters spectra during both model training and mzML recalibration. Typical narrow DIA windows (~1 m/z) are retained.
+
 ## Output Files
 
 | File | Description |
 |------|-------------|
 | `{input}-mars.mzML` | Recalibrated mzML file |
 | `mars_model.pkl` | Trained XGBoost calibration model |
-| `mars_qc_histogram.png` | Delta m/z distribution (before/after) |
+| `mars_qc_histogram.png` | Delta m/z distribution with MAD and RMS statistics (before/after) |
 | `mars_qc_heatmap.png` | 2D heatmap (RT × m/z, color = delta) |
 | `mars_qc_feature_importance.png` | Model feature importance |
 | `mars_qc_summary.txt` | Calibration statistics |
 
 ## Model Features
 
-The XGBoost model uses 5 features to predict m/z corrections:
+The XGBoost model uses up to 9 features to predict m/z corrections:
 
 1. `precursor_mz` - DIA isolation window center
 2. `fragment_mz` - Fragment m/z being calibrated  
-3. `rt` - Retention time
+3. `absolute_time` - Time relative to first acquisition (seconds)
 4. `log_tic` - Log10 of spectrum total ion current
 5. `log_intensity` - Log10 of peak intensity
+6. `injection_time` - Ion injection time (seconds)
+7. `tic_injection_time` - TIC × injection time product
+8. `fragment_ions` - Fragment intensity × injection time (total ions, not rate)
+9. `rfa2_temp` - RF amplifier temperature (°C)
+10. `rfc2_temp` - RF electronics temperature (°C)
+
+**Note**: Features 6-8 are only included if injection time data is available in the mzML files. Features 9-10 are only included if temperature CSV files are provided. Features with universally missing data are automatically excluded.
+
+## RF Temperature Data
+
+Mars can incorporate RF temperature data to model thermal effects on mass accuracy. Temperature data is loaded from CSV files exported from Thermo chromatogram exports.
+
+### Temperature File Format
+
+Temperature CSV files should be in Thermo's chromatogram export format:
+- 3 header lines (skipped)
+- Columns: `Time(min)`, temperature value
+
+Example naming convention:
+```
+RFA2-Sample_Name.csv  # RF amplifier temperature
+RFC2-Sample_Name.csv  # RF electronics temperature  
+```
+
+### Usage with Temperature Data
+
+```bash
+mars calibrate \
+  --mzml data.mzML \
+  --prism-csv report.csv \
+  --temperature-dir /path/to/temperature_csvs/ \
+  --output-dir output/
+```
+
+Mars automatically finds temperature files matching each mzML filename and interpolates temperature values at each spectrum's retention time.
 
 ## Python API
 

@@ -29,6 +29,9 @@ class DIASpectrum:
     tic: float  # Total ion current
     mz_array: np.ndarray  # Fragment m/z values
     intensity_array: np.ndarray  # Fragment intensities
+    injection_time: float | None = None  # Ion injection time in seconds (optional)
+    acquisition_start_time: float | None = None  # File acquisition start time (Unix timestamp)
+    absolute_time: float | None = None  # Absolute time in seconds (normalized to earliest file)
 
     @property
     def n_peaks(self) -> int:
@@ -102,19 +105,85 @@ def _extract_scan_number(spectrum: dict) -> int:
     return spectrum.get("index", 0)
 
 
+def _extract_injection_time(spectrum: dict) -> float | None:
+    """Extract ion injection time from spectrum metadata.
+
+    Args:
+        spectrum: Pyteomics spectrum dict
+
+    Returns:
+        Injection time in seconds, or None if not found
+    """
+    try:
+        precursor_list = spectrum.get("precursorList", {})
+        precursors = precursor_list.get("precursor", [])
+
+        if precursors:
+            precursor = precursors[0]
+            # Look for ion injection time in precursor
+            injection_time_ms = precursor.get("ion injection time")
+            if injection_time_ms is not None:
+                # Convert from milliseconds to seconds
+                return float(injection_time_ms) / 1000.0
+
+        # Also check in scan level
+        scan_list = spectrum.get("scanList", {})
+        scans = scan_list.get("scan", [])
+        if scans:
+            injection_time_ms = scans[0].get("ion injection time")
+            if injection_time_ms is not None:
+                return float(injection_time_ms) / 1000.0
+
+    except Exception as e:
+        logger.debug(f"Failed to extract injection time: {e}")
+
+    return None
+
+
+def _parse_iso8601_timestamp(timestamp_str: str) -> float | None:
+    """Parse ISO 8601 timestamp to Unix timestamp.
+
+    Args:
+        timestamp_str: ISO 8601 formatted timestamp string (e.g., "2023-01-15T10:30:45Z")
+
+    Returns:
+        Unix timestamp (float) or None if parsing fails
+    """
+    try:
+        from datetime import datetime
+
+        # Try parsing with timezone info
+        try:
+            dt = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            # Fallback: try without timezone
+            dt = datetime.fromisoformat(timestamp_str)
+
+        # Convert to Unix timestamp
+        return float(dt.timestamp())
+    except Exception as e:
+        logger.debug(f"Failed to parse ISO 8601 timestamp '{timestamp_str}': {e}")
+        return None
+
+
 def read_dia_spectra(
     mzml_path: Path | str,
     ms_level: int = 2,
+    min_absolute_time: float | None = None,
 ) -> Iterator[DIASpectrum]:
     """Stream DIA MS2 spectra from mzML file.
 
     Args:
         mzml_path: Path to mzML file
         ms_level: MS level to extract (default: 2 for MS2)
+        min_absolute_time: Minimum absolute time to use for normalization (seconds).
+                          If provided, all absolute_time values will be normalized to this reference.
 
     Yields:
         DIASpectrum objects for each matching spectrum
     """
+    import re
+    
     mzml_path = Path(mzml_path)
     logger.info(f"Reading DIA spectra from {mzml_path}")
 
@@ -123,6 +192,28 @@ def read_dia_spectra(
 
     n_spectra = 0
     n_yielded = 0
+    acquisition_start_time = None
+    
+    # Extract startTimeStamp from the <run> element before processing spectra
+    try:
+        with open(mzml_path, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f):
+                if 'startTimeStamp' in line:
+                    match = re.search(r'startTimeStamp="([^"]+)"', line)
+                    if match:
+                        timestamp_str = match.group(1)
+                        acquisition_start_time = _parse_iso8601_timestamp(timestamp_str)
+                        if acquisition_start_time is not None:
+                            logger.info(f"Found acquisition start time: {timestamp_str}")
+                        break
+                # Stop searching after a reasonable number of lines (run element should be near the top)
+                if line_num > 200:
+                    break
+    except Exception as e:
+        logger.debug(f"Failed to extract startTimeStamp: {e}")
+    
+    if acquisition_start_time is None:
+        logger.info("No acquisition start time found in mzML, will use RT as absolute time")
 
     with mzml.MzML(str(mzml_path)) as reader:
         for spectrum in reader:
@@ -164,6 +255,22 @@ def read_dia_spectra(
             # Get scan number
             scan_number = _extract_scan_number(spectrum)
 
+            # Extract injection time
+            injection_time = _extract_injection_time(spectrum)
+
+            # Calculate absolute_time
+            # If acquisition_start_time is available, use it; otherwise use RT in seconds
+            if acquisition_start_time is not None:
+                # Use acquisition start time + RT offset
+                absolute_time = acquisition_start_time + (rt * 60.0)
+            else:
+                # Fallback: use RT converted to seconds
+                absolute_time = rt * 60.0
+            
+            # Normalize to min_absolute_time if provided
+            if min_absolute_time is not None:
+                absolute_time = absolute_time - min_absolute_time
+
             n_yielded += 1
             yield DIASpectrum(
                 scan_number=scan_number,
@@ -174,6 +281,9 @@ def read_dia_spectra(
                 tic=tic,
                 mz_array=np.asarray(mz_array, dtype=np.float64),
                 intensity_array=np.asarray(intensity_array, dtype=np.float64),
+                injection_time=injection_time,
+                acquisition_start_time=acquisition_start_time,
+                absolute_time=absolute_time,
             )
 
     logger.info(f"Read {n_yielded} MS2 spectra from {n_spectra} total spectra")
@@ -183,6 +293,8 @@ def write_calibrated_mzml(
     input_path: Path | str,
     output_path: Path | str,
     calibration_func,
+    max_isolation_window_width: float | None = None,
+    temperature_data: dict | None = None,
 ) -> None:
     """Write calibrated mzML file with corrected m/z values.
 
@@ -191,6 +303,9 @@ def write_calibrated_mzml(
         output_path: Path for output mzML file
         calibration_func: Function that takes (spectrum_metadata, mz_array)
                          and returns calibrated mz_array
+        max_isolation_window_width: Maximum isolation window width (m/z) to process.
+                                    Spectra with wider windows are skipped
+        temperature_data: Dict mapping source names (e.g., 'RFA2', 'RFC2') to TemperatureData objects
     """
     input_path = Path(input_path)
     output_path = Path(output_path)
@@ -200,10 +315,23 @@ def write_calibrated_mzml(
     # For now, we'll use a simple approach: read, modify, write
     # A more sophisticated approach would use streaming
     import base64
+    import re
     import struct as struct_module
     import zlib as zlib_module
 
     from lxml import etree
+
+    # Extract startTimeStamp from the file (for absolute_time calculation)
+    acquisition_start_time = None
+    with open(input_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            if "<run" in line and "startTimeStamp" in line:
+                match = re.search(r'startTimeStamp="([^"]+)"', line)
+                if match:
+                    acquisition_start_time = _parse_iso8601_timestamp(match.group(1))
+                break
+            if "</run>" in line or "<spectrumList" in line:
+                break
 
     # Parse XML
     tree = etree.parse(str(input_path))
@@ -226,24 +354,58 @@ def write_calibrated_mzml(
         if ms_level != 2:
             continue
 
-        # Extract RT and isolation window for calibration
+        # Extract RT, injection time, and isolation window for calibration
         rt = 0.0
+        injection_time = 0.0
         precursor_mz = 0.0
+        precursor_mz_low = 0.0
+        precursor_mz_high = 0.0
         tic = 0.0
 
         for scan in spectrum.iter("{%s}scan" % ns["ms"]):
             for cv_param in scan.iter("{%s}cvParam" % ns["ms"]):
-                if cv_param.get("name") == "scan start time":
+                name = cv_param.get("name", "")
+                if name == "scan start time":
                     rt = float(cv_param.get("value", 0.0))
+                elif name == "ion injection time":
+                    # Convert ms to seconds
+                    injection_time = float(cv_param.get("value", 0.0)) / 1000.0
 
         for isolation in spectrum.iter("{%s}isolationWindow" % ns["ms"]):
             for cv_param in isolation.iter("{%s}cvParam" % ns["ms"]):
-                if cv_param.get("name") == "isolation window target m/z":
+                name = cv_param.get("name", "")
+                if name == "isolation window target m/z":
                     precursor_mz = float(cv_param.get("value", 0.0))
+                elif name == "isolation window lower offset":
+                    lower_offset = float(cv_param.get("value", 0.0))
+                    precursor_mz_low = precursor_mz - lower_offset
+                elif name == "isolation window upper offset":
+                    upper_offset = float(cv_param.get("value", 0.0))
+                    precursor_mz_high = precursor_mz + upper_offset
+
+        # Skip spectra with wide isolation windows if max_isolation_window_width is set
+        if max_isolation_window_width is not None and precursor_mz_low > 0 and precursor_mz_high > 0:
+            window_width = precursor_mz_high - precursor_mz_low
+            if window_width > max_isolation_window_width:
+                continue
 
         for cv_param in spectrum.iter("{%s}cvParam" % ns["ms"]):
             if cv_param.get("name") == "total ion current":
                 tic = float(cv_param.get("value", 0.0))
+
+        # Calculate absolute time (seconds since acquisition start + RT in minutes)
+        absolute_time = 0.0
+        if acquisition_start_time is not None:
+            absolute_time = acquisition_start_time + rt * 60.0
+
+        # Look up temperatures at this RT
+        rfa2_temp = 0.0
+        rfc2_temp = 0.0
+        if temperature_data is not None:
+            if "RFA2" in temperature_data:
+                rfa2_temp = temperature_data["RFA2"].get_temperature_at_time(rt)
+            if "RFC2" in temperature_data:
+                rfc2_temp = temperature_data["RFC2"].get_temperature_at_time(rt)
 
         # Find m/z and intensity binary data arrays
         mz_array = None
@@ -304,6 +466,10 @@ def write_calibrated_mzml(
                 "rt": rt,
                 "precursor_mz": precursor_mz,
                 "tic": tic,
+                "injection_time": injection_time,
+                "absolute_time": absolute_time,
+                "rfa2_temp": rfa2_temp,
+                "rfc2_temp": rfc2_temp,
             }
             calibrated_mz = calibration_func(metadata, mz_array, intensity_array)
 

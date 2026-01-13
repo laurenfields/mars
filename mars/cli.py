@@ -114,6 +114,18 @@ def main():
     help="Minimum observed peak intensity to use for matching",
 )
 @click.option(
+    "--max-isolation-window",
+    type=float,
+    default=None,
+    help="Maximum isolation window width (m/z) to process. Skips wider windows (e.g., 5.0 to ignore 20-30 m/z wide bins)",
+)
+@click.option(
+    "--temperature-dir",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True),
+    default=None,
+    help="Directory containing RF temperature CSV files (RFA2-*.csv, RFC2-*.csv)",
+)
+@click.option(
     "--prism-csv",
     type=click.Path(exists=True, dir_okay=False),
     help="PRISM Skyline report CSV with Start Time/End Time for RT ranges",
@@ -148,6 +160,8 @@ def calibrate(
     output_dir: str,
     tolerance: float,
     min_intensity: float,
+    max_isolation_window: float | None,
+    temperature_dir: str | None,
     prism_csv: str | None,
     rt_window: float,
     model_path: str | None,
@@ -219,11 +233,25 @@ def calibrate(
         library_entries = load_blib(library, rt_window=rt_window)
         logger.info(f"Loaded {len(library_entries)} library entries from blib")
 
+    # Load temperature data if provided
+    temperature_data_by_file = {}
+    if temperature_dir:
+        from mars.temperature import find_temperature_files
+
+        temp_dir_path = Path(temperature_dir)
+        for mzml_file in mzml_files:
+            temp_data = find_temperature_files(mzml_file, temp_dir_path)
+            if temp_data:
+                temperature_data_by_file[mzml_file.name] = temp_data
+
     # Collect matches from all files
     all_matches = []
 
     for mzml_file in mzml_files:
         logger.info(f"Processing: {mzml_file.name}")
+
+        # Get temperature data for this file
+        temperature_data = temperature_data_by_file.get(mzml_file.name)
 
         # Read spectra and match
         spectra = read_dia_spectra(mzml_file)
@@ -232,6 +260,8 @@ def calibrate(
             spectra,
             mz_tolerance=tolerance,
             min_intensity=min_intensity,
+            max_isolation_window_width=max_isolation_window,
+            temperature_data=temperature_data,
         )
 
         if len(matches) > 0:
@@ -249,6 +279,13 @@ def calibrate(
 
     combined_matches = pd.concat(all_matches, ignore_index=True)
     logger.info(f"Total matches: {len(combined_matches):,}")
+
+    # Normalize absolute_time across all files (subtract global minimum so first run starts at ~0)
+    if "absolute_time" in combined_matches.columns and combined_matches["absolute_time"].notna().any():
+        min_absolute_time = combined_matches["absolute_time"].min()
+        combined_matches["absolute_time"] = combined_matches["absolute_time"] - min_absolute_time
+        max_time = combined_matches["absolute_time"].max()
+        logger.info(f"Absolute time range: 0 to {max_time:.1f} seconds ({max_time/60:.1f} minutes)")
 
     # Train model
     logger.info("Training calibration model...")
@@ -277,7 +314,13 @@ def calibrate(
         for mzml_file in mzml_files:
             output_file = get_output_path(mzml_file, output_path)
             logger.info(f"Writing: {output_file.name}")
-            write_calibrated_mzml(mzml_file, output_file, calibration_func)
+            # Get temperature data for this file
+            temp_data = temperature_data_by_file.get(mzml_file.name)
+            write_calibrated_mzml(
+                mzml_file, output_file, calibration_func, 
+                max_isolation_window_width=max_isolation_window,
+                temperature_data=temp_data
+            )
 
     logger.info("Done!")
     logger.info(f"Output directory: {output_path}")
@@ -363,6 +406,7 @@ def qc(
             library_entries,
             spectra,
             mz_tolerance=tolerance,
+            max_isolation_window_width=max_isolation_window,
         )
         if len(matches) > 0:
             all_matches.append(matches)
@@ -421,6 +465,12 @@ def qc(
     help="Output directory for calibrated files",
 )
 @click.option(
+    "--max-isolation-window",
+    type=float,
+    default=None,
+    help="Maximum isolation window width (m/z) to process. Skips wider windows in output",
+)
+@click.option(
     "-v",
     "--verbose",
     is_flag=True,
@@ -431,6 +481,7 @@ def apply(
     mzml_dir: str | None,
     model: str,
     output_dir: str,
+    max_isolation_window: float | None,
     verbose: bool,
 ):
     """Apply pre-trained calibration model to mzML files.
@@ -460,7 +511,9 @@ def apply(
     for mzml_file in mzml_files:
         output_file = get_output_path(mzml_file, output_path)
         logger.info(f"Calibrating: {mzml_file.name} -> {output_file.name}")
-        write_calibrated_mzml(mzml_file, output_file, calibration_func)
+        write_calibrated_mzml(
+            mzml_file, output_file, calibration_func, max_isolation_window_width=max_isolation_window
+        )
 
     logger.info("Done!")
 

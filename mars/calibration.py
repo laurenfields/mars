@@ -50,45 +50,146 @@ class MzCalibrator:
         self.random_state = random_state
         self.model = None
         self.feature_names = [
+            "precursor_mz",
             "fragment_mz",
-            "rt",
+            "absolute_time",
             "log_tic",
             "log_intensity",
+            "injection_time",
+            "tic_injection_time",
+            "fragment_ions",
+            "rfa2_temp",
+            "rfc2_temp",
         ]
         self.training_stats: dict[str, Any] = {}
 
     def _prepare_features(
         self,
-        fragment_mz: np.ndarray,
-        rt: np.ndarray,
-        tic: np.ndarray,
-        intensity: np.ndarray,
-    ) -> np.ndarray:
-        """Prepare feature matrix for model.
+        matches: pd.DataFrame,
+    ) -> tuple[np.ndarray, list[str]]:
+        """Prepare feature matrix for model, handling missing values and dynamic feature selection.
+
+        Strategies for missing values:
+        - If injection_time is missing in ALL rows: remove injection_time and tic_injection_time from features
+        - If injection_time is missing in SOME rows: drop those rows with NaN values
+        - If absolute_time is None: use fallback or skip if not available
 
         Args:
-            fragment_mz: Fragment m/z values
-            rt: Retention times
-            tic: Total ion currents (spectrum level)
-            intensity: Peak intensities (fragment level)
+            matches: DataFrame from match_library_to_spectra with columns including:
+                     precursor_mz, fragment_mz, absolute_time, log_tic, log_intensity,
+                     injection_time, tic_injection_time
 
         Returns:
-            Feature matrix (n_samples, 4)
+            Tuple of (feature_matrix, active_feature_names) where active_feature_names
+            may be a subset of self.feature_names if some features are unavailable
         """
-        # Log-transform TIC and intensity for better scaling
-        log_tic = np.log10(np.clip(tic, 1, None))
-        log_intensity = np.log10(np.clip(intensity, 1, None))
+        df = matches.copy()
 
-        X = np.column_stack(
-            [
-                fragment_mz,
-                rt,
-                log_tic,
-                log_intensity,
-            ]
+        # Check which features are actually available
+        active_features = []
+        feature_data = {}
+
+        # Always include these (should always be available)
+        for col in ["precursor_mz", "fragment_mz", "log_tic", "log_intensity"]:
+            if col in df.columns:
+                active_features.append(col)
+                feature_data[col] = df[col].values
+            else:
+                logger.warning(f"Required feature '{col}' not found in matches DataFrame")
+
+        # Conditionally include optional features
+        if "absolute_time" in df.columns and df["absolute_time"].notna().any():
+            active_features.append("absolute_time")
+            feature_data["absolute_time"] = df["absolute_time"].values
+
+        # Check injection_time availability
+        injection_time_available = (
+            "injection_time" in df.columns and df["injection_time"].notna().any()
+        )
+        tic_injection_time_available = (
+            "tic_injection_time" in df.columns and df["tic_injection_time"].notna().any()
         )
 
-        return X
+        if injection_time_available:
+            # If injection_time is sparse (some missing), drop rows with NaN
+            if df["injection_time"].isna().any():
+                n_before = len(df)
+                df = df.dropna(subset=["injection_time"])
+                n_after = len(df)
+                logger.info(
+                    f"Dropped {n_before - n_after} rows with missing injection_time "
+                    f"({n_after} rows retained)"
+                )
+
+            active_features.append("injection_time")
+            feature_data["injection_time"] = df["injection_time"].values
+
+            if tic_injection_time_available:
+                # If tic_injection_time sparse, drop additional rows
+                if df["tic_injection_time"].isna().any():
+                    n_before = len(df)
+                    df = df.dropna(subset=["tic_injection_time"])
+                    n_after = len(df)
+                    logger.info(
+                        f"Dropped {n_before - n_after} rows with missing tic_injection_time "
+                        f"({n_after} rows retained)"
+                    )
+
+                active_features.append("tic_injection_time")
+                feature_data["tic_injection_time"] = df["tic_injection_time"].values
+
+            # Check fragment_ions availability (fragment_intensity × injection_time)
+            fragment_ions_available = (
+                "fragment_ions" in df.columns and df["fragment_ions"].notna().any()
+            )
+            if fragment_ions_available:
+                if df["fragment_ions"].isna().any():
+                    n_before = len(df)
+                    df = df.dropna(subset=["fragment_ions"])
+                    n_after = len(df)
+                    logger.info(
+                        f"Dropped {n_before - n_after} rows with missing fragment_ions "
+                        f"({n_after} rows retained)"
+                    )
+                    # Update feature_data for already-added features after row filtering
+                    for feat in active_features:
+                        feature_data[feat] = df[feat].values
+
+                active_features.append("fragment_ions")
+                feature_data["fragment_ions"] = df["fragment_ions"].values
+        else:
+            logger.info("injection_time not available in all spectra - skipping injection_time features")
+
+        # Check temperature features availability
+        for temp_col in ["rfa2_temp", "rfc2_temp"]:
+            if temp_col in df.columns and df[temp_col].notna().any():
+                # If temperature is sparse, drop rows with NaN
+                if df[temp_col].isna().any():
+                    n_before = len(df)
+                    df = df.dropna(subset=[temp_col])
+                    n_after = len(df)
+                    logger.info(
+                        f"Dropped {n_before - n_after} rows with missing {temp_col} "
+                        f"({n_after} rows retained)"
+                    )
+                    # Update feature_data for already-added features after row filtering
+                    for feat in active_features:
+                        feature_data[feat] = df[feat].values
+
+                active_features.append(temp_col)
+                feature_data[temp_col] = df[temp_col].values
+            else:
+                logger.info(f"{temp_col} not available - skipping this temperature feature")
+
+        # Build feature matrix with active features only
+        X = np.column_stack([feature_data[col] for col in active_features])
+
+        # Update self.feature_names to reflect what was actually used
+        self.feature_names = active_features
+
+        logger.info(f"Using {len(active_features)} features: {active_features}")
+
+        return X, active_features
 
     def fit(
         self,
@@ -100,7 +201,8 @@ class MzCalibrator:
 
         Args:
             matches: DataFrame from match_library_to_spectra with columns:
-                     precursor_mz, fragment_mz, fragment_charge, rt, tic, delta_mz
+                     precursor_mz, fragment_mz, absolute_time, log_tic, log_intensity,
+                     injection_time, tic_injection_time, delta_mz
             validation_split: Fraction of data for validation
             sample_weight_col: Column to use for sample weights (observed_intensity
                               recommended - more intense fragments give better calibration)
@@ -112,13 +214,8 @@ class MzCalibrator:
 
         logger.info(f"Training XGBoost calibration model on {len(matches)} matches")
 
-        # Prepare features
-        X = self._prepare_features(
-            matches["fragment_mz"].values,
-            matches["rt"].values,
-            matches["tic"].values,
-            matches["observed_intensity"].values,
-        )
+        # Prepare features (this also updates self.feature_names based on availability)
+        X, active_features = self._prepare_features(matches)
         y = matches["delta_mz"].values
 
         # Optional sample weights
@@ -183,7 +280,7 @@ class MzCalibrator:
         # Feature importance
         importance = self.model.feature_importances_
         self.training_stats["feature_importance"] = dict(
-            zip(self.feature_names, importance.tolist())
+            zip(active_features, importance.tolist())
         )
 
         logger.info("Training complete:")
@@ -201,18 +298,19 @@ class MzCalibrator:
 
     def predict(
         self,
-        fragment_mz: np.ndarray,
-        rt: np.ndarray,
-        tic: np.ndarray,
-        intensity: np.ndarray,
+        matches: pd.DataFrame | None = None,
+        **kwargs,
     ) -> np.ndarray:
         """Predict m/z correction for given features.
 
+        Can be called in two ways:
+        1. predict(matches_df) - DataFrame with all feature columns
+        2. predict(feature1=arr1, feature2=arr2, ...) - explicit feature arrays (legacy, only if
+           all features match current model exactly)
+
         Args:
-            fragment_mz: Fragment m/z values
-            rt: Retention times
-            tic: Total ion currents (spectrum level)
-            intensity: Peak intensities (fragment level)
+            matches: DataFrame with feature columns matching active features, or None
+            **kwargs: Named feature arrays (only if matches is None and using legacy interface)
 
         Returns:
             Predicted m/z corrections (subtract from observed m/z to recalibrate)
@@ -220,12 +318,21 @@ class MzCalibrator:
         if self.model is None:
             raise ValueError("Model not trained. Call fit() first.")
 
-        X = self._prepare_features(
-            fragment_mz,
-            rt,
-            tic,
-            intensity,
-        )
+        if matches is not None:
+            # Use DataFrame interface
+            X, _ = self._prepare_features(matches)
+        else:
+            # Legacy interface: build feature matrix from kwargs
+            if not self.feature_names:
+                raise ValueError("No features defined for prediction")
+
+            feature_data = {}
+            for feat in self.feature_names:
+                if feat not in kwargs:
+                    raise ValueError(f"Missing required feature for prediction: {feat}")
+                feature_data[feat] = kwargs[feat]
+
+            X = np.column_stack([feature_data[col] for col in self.feature_names])
 
         return self.model.predict(X)
 
@@ -242,7 +349,8 @@ class MzCalibrator:
             """Apply calibration to an m/z array.
 
             Args:
-                metadata: Dict with rt, precursor_mz, tic
+                metadata: Dict with feature values. Required keys depend on active features
+                          Typical keys: precursor_mz, absolute_time, tic, injection_time
                 mz_array: Array of m/z values to calibrate
                 intensity_array: Array of peak intensities (if None, uses default)
 
@@ -258,13 +366,44 @@ class MzCalibrator:
             if intensity_array is None or len(intensity_array) != n:
                 intensity_array = np.full(n, 1000.0)  # Default moderate intensity
 
-            # Get corrections for each m/z
-            corrections = self.predict(
-                fragment_mz=mz_array,
-                rt=np.full(n, metadata.get("rt", 0.0)),
-                tic=np.full(n, metadata.get("tic", 1e6)),
-                intensity=intensity_array,
-            )
+            # Build feature arrays for prediction
+            feature_data = {}
+
+            for feat in self.feature_names:
+                if feat == "precursor_mz":
+                    feature_data[feat] = np.full(n, metadata.get("precursor_mz", 0.0))
+                elif feat == "fragment_mz":
+                    feature_data[feat] = mz_array
+                elif feat == "log_tic":
+                    tic = metadata.get("tic", 1e6)
+                    feature_data[feat] = np.full(n, np.log10(np.clip(tic, 1, None)))
+                elif feat == "log_intensity":
+                    feature_data[feat] = np.log10(np.clip(intensity_array, 1, None))
+                elif feat == "absolute_time":
+                    feature_data[feat] = np.full(n, metadata.get("absolute_time", 0.0))
+                elif feat == "injection_time":
+                    feature_data[feat] = np.full(n, metadata.get("injection_time", 0.0))
+                elif feat == "tic_injection_time":
+                    tic = metadata.get("tic", 1e6)
+                    injection_time = metadata.get("injection_time", 0.0)
+                    feature_data[feat] = np.full(n, tic * injection_time)
+                elif feat == "fragment_ions":
+                    # fragment_ions = intensity × injection_time
+                    injection_time = metadata.get("injection_time", 0.0)
+                    feature_data[feat] = intensity_array * injection_time
+                elif feat == "rfa2_temp":
+                    feature_data[feat] = np.full(n, metadata.get("rfa2_temp", 0.0))
+                elif feat == "rfc2_temp":
+                    feature_data[feat] = np.full(n, metadata.get("rfc2_temp", 0.0))
+                else:
+                    # Unknown feature - use default of 0
+                    feature_data[feat] = np.full(n, 0.0)
+
+            # Build feature matrix in correct order
+            X = np.column_stack([feature_data[col] for col in self.feature_names])
+
+            # Get corrections
+            corrections = self.model.predict(X)
 
             # Apply correction (subtract predicted delta to recalibrate)
             return mz_array - corrections

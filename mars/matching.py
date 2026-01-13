@@ -38,8 +38,11 @@ class FragmentMatch:
     precursor_mz: float  # Center of DIA isolation window
     fragment_mz: float  # Same as expected_mz (for convenience)
     fragment_charge: int
-    rt: float  # Retention time in minutes
-    tic: float  # Spectrum total ion current
+    absolute_time: float | None  # Absolute time in seconds (normalized to earliest file)
+    log_tic: float  # Log10 of spectrum total ion current
+    log_intensity: float  # Log10 of peak intensity
+    injection_time: float | None  # Ion injection time in seconds (optional)
+    tic_injection_time: float | None  # TIC * injection_time (optional, only if injection_time available)
 
     # Metadata
     peptide_sequence: str
@@ -231,6 +234,8 @@ def match_library_to_spectra(
     min_intensity: float = 500.0,
     min_rt: float | None = None,
     max_rt: float | None = None,
+    max_isolation_window_width: float | None = None,
+    temperature_data: dict | None = None,
     show_progress: bool = True,
 ) -> pd.DataFrame:
     """Match library fragments to measured spectra within RT and precursor windows.
@@ -251,6 +256,10 @@ def match_library_to_spectra(
         min_intensity: Minimum observed intensity to use (default: 500)
         min_rt: Minimum RT to process (minutes)
         max_rt: Maximum RT to process (minutes)
+        max_isolation_window_width: Maximum isolation window width (m/z) to process.
+                                    Spectra with wider windows are skipped (e.g., set to 5.0
+                                    to ignore wide 20-30 m/z windows and only process narrow bins)
+        temperature_data: Dict mapping source names (e.g., 'RFA2', 'RFC2') to TemperatureData objects
         show_progress: Show progress bar
 
     Returns:
@@ -279,15 +288,24 @@ def match_library_to_spectra(
     matched_peptide_keys: set[str] = set()  # Track unique peptides matched
     precursor_ranges_seen: set[tuple[int, int]] = set()  # Track DIA windows seen
 
+    # Collect spectra into a list for processing
+    spectra_list = list(spectra)
+
     # Process spectra
     spectra_iter = (
-        tqdm(spectra, desc="Matching spectra", unit="spectra", delay=0.5)
+        tqdm(spectra_list, desc="Matching spectra", unit="spectra", delay=0.5)
         if show_progress
-        else spectra
+        else spectra_list
     )
 
     for spectrum in spectra_iter:
         n_spectra += 1
+
+        # Isolation window width filter
+        if max_isolation_window_width is not None:
+            window_width = spectrum.precursor_mz_high - spectrum.precursor_mz_low
+            if window_width > max_isolation_window_width:
+                continue
 
         # RT filter
         if min_rt is not None and spectrum.rt < min_rt:
@@ -344,6 +362,37 @@ def match_library_to_spectra(
                 observed_mz, observed_intensity = result
                 delta_mz = observed_mz - fragment.mz
 
+                # Calculate log-transformed features
+                log_tic = float(np.log10(np.clip(spectrum.tic, 1, None)))
+                log_intensity = float(np.log10(np.clip(observed_intensity, 1, None)))
+
+                # Calculate tic_injection_time if injection_time is available
+                tic_injection_time = None
+                if spectrum.injection_time is not None:
+                    tic_injection_time = spectrum.tic * spectrum.injection_time
+
+                # Calculate fragment_ions (observed_intensity × injection_time)
+                # This gives total fragment ion count rather than ions/sec rate
+                fragment_ions = None
+                if spectrum.injection_time is not None:
+                    fragment_ions = observed_intensity * spectrum.injection_time
+
+                # Use raw absolute_time (Unix timestamp) - spans across multiple runs
+                absolute_time = spectrum.absolute_time
+
+                # Look up temperatures at this RT (if temperature data available)
+                rfa2_temp = None
+                rfc2_temp = None
+                if temperature_data is not None:
+                    if "RFA2" in temperature_data:
+                        rfa2_temp = temperature_data["RFA2"].get_temperature_at_time(
+                            spectrum.rt
+                        )
+                    if "RFC2" in temperature_data:
+                        rfc2_temp = temperature_data["RFC2"].get_temperature_at_time(
+                            spectrum.rt
+                        )
+
                 # Create match record
                 ion_annotation = f"{fragment.ion_type}{fragment.ion_number}+{fragment.charge}"
 
@@ -357,8 +406,15 @@ def match_library_to_spectra(
                         "precursor_mz": spectrum.precursor_mz_center,
                         "fragment_mz": fragment.mz,
                         "fragment_charge": fragment.charge,
+                        "absolute_time": absolute_time,
+                        "log_tic": log_tic,
+                        "log_intensity": log_intensity,
+                        "injection_time": spectrum.injection_time,
+                        "tic_injection_time": tic_injection_time,
+                        "fragment_ions": fragment_ions,
+                        "rfa2_temp": rfa2_temp,
+                        "rfc2_temp": rfc2_temp,
                         "rt": spectrum.rt,
-                        "tic": spectrum.tic,
                         "peptide_sequence": entry.modified_sequence,
                         "ion_annotation": ion_annotation,
                         "scan_number": spectrum.scan_number,
@@ -455,13 +511,8 @@ def apply_calibration_to_matches(
     """
     df = matches.copy()
 
-    # Get predictions
-    corrections = calibrator.predict(
-        fragment_mz=df["fragment_mz"].values,
-        rt=df["rt"].values,
-        tic=df["tic"].values,
-        intensity=df["observed_intensity"].values,
-    )
+    # Get predictions using DataFrame interface
+    corrections = calibrator.predict(matches=df)
 
     # Apply corrections
     df["delta_mz_calibrated"] = df["delta_mz"] - corrections
