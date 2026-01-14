@@ -70,7 +70,7 @@ def find_mzml_files(
 
 
 @click.group()
-@click.version_option(version="0.1.1", prog_name="mars")
+@click.version_option(version="0.1.2", prog_name="mars")
 def main():
     """Mars: Mass Accuracy Recalibration System for Thermo Stellar DIA data."""
     pass
@@ -104,7 +104,13 @@ def main():
     type=float,
     default=0.7,
     show_default=True,
-    help="m/z tolerance for fragment matching (Th)",
+    help="m/z tolerance for fragment matching in Th (ignored if --tolerance-ppm is set)",
+)
+@click.option(
+    "--tolerance-ppm",
+    type=float,
+    default=None,
+    help="m/z tolerance for fragment matching in ppm (e.g., 10 for Astral data). Overrides --tolerance.",
 )
 @click.option(
     "--min-intensity",
@@ -159,6 +165,7 @@ def calibrate(
     library: str,
     output_dir: str,
     tolerance: float,
+    tolerance_ppm: float | None,
     min_intensity: float,
     max_isolation_window: float | None,
     temperature_dir: str | None,
@@ -217,10 +224,10 @@ def calibrate(
     if prism_csv:
         from mars.library import load_prism_library
 
-        # For single file, filter to that file's replicate
-        file_filter = mzml_files[0].stem if len(mzml_files) == 1 else None
+        # Pass all mzML filenames to filter library to only relevant replicates
+        file_filters = [f.stem for f in mzml_files]
         logger.info(f"Loading library from PRISM CSV: {prism_csv}")
-        library_entries = load_prism_library(prism_csv, mzml_filename=file_filter)
+        library_entries = load_prism_library(prism_csv, mzml_filename=file_filters)
         logger.info(f"Loaded {len(library_entries)} library entries with theoretical m/z")
     else:
         # Fallback to blib (requires --library)
@@ -262,6 +269,7 @@ def calibrate(
             min_intensity=min_intensity,
             max_isolation_window_width=max_isolation_window,
             temperature_data=temperature_data,
+            tolerance_ppm=tolerance_ppm,
         )
 
         if len(matches) > 0:
@@ -361,7 +369,13 @@ def calibrate(
     type=float,
     default=0.7,
     show_default=True,
-    help="m/z tolerance for fragment matching (Da)",
+    help="m/z tolerance for fragment matching in Th (ignored if --tolerance-ppm is set)",
+)
+@click.option(
+    "--tolerance-ppm",
+    type=float,
+    default=None,
+    help="m/z tolerance for fragment matching in ppm (e.g., 10 for Astral data). Overrides --tolerance.",
 )
 @click.option(
     "--max-isolation-window",
@@ -381,6 +395,7 @@ def qc(
     library: str,
     output: str,
     tolerance: float,
+    tolerance_ppm: float | None,
     max_isolation_window: float | None,
     verbose: bool,
 ):
@@ -421,6 +436,7 @@ def qc(
             spectra,
             mz_tolerance=tolerance,
             max_isolation_window_width=max_isolation_window,
+            tolerance_ppm=tolerance_ppm,
         )
         if len(matches) > 0:
             all_matches.append(matches)

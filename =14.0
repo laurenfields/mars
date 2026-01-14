@@ -1,0 +1,2 @@
+Defaulting to user installation because normal site-packages is not writeable
+Requirement already satisfied: pyarrow in /home/maccoss/.local/lib/python3.12/site-packages (22.0.0)

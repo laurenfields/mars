@@ -370,13 +370,12 @@ def load_prism_library(
 
     Args:
         path: Path to PRISM CSV file
-        mzml_filename: Optional mzML filename to filter to specific replicate
+        mzml_filename: Optional mzML filename(s) to filter to specific replicate(s).
+                      Can be a single filename string or a list of filenames.
 
     Returns:
         List of LibraryEntry objects with fragments
     """
-    import re
-
     import pandas as pd
 
     path = Path(path)
@@ -385,10 +384,7 @@ def load_prism_library(
     if not path.exists():
         raise FileNotFoundError(f"PRISM CSV file not found: {path}")
 
-    df = pd.read_csv(path)
-    logger.info(f"Loaded {len(df)} rows from PRISM CSV")
-
-    # Required columns
+    # Define columns we need - load only these for faster I/O
     required_cols = [
         "Peptide Modified Sequence Unimod Ids",
         "Precursor Charge",
@@ -399,67 +395,141 @@ def load_prism_library(
         "Start Time",
         "End Time",
     ]
-    missing = [c for c in required_cols if c not in df.columns]
+    optional_cols = ["Replicate Name", "File Name", "Retention Time", "Protein Accession", "Area"]
+
+    # First pass: check which columns exist (read just header)
+    header_df = pd.read_csv(path, nrows=0)
+    available_cols = set(header_df.columns)
+
+    missing = [c for c in required_cols if c not in available_cols]
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
 
-    # Filter to specific replicate if mzml_filename provided
-    if mzml_filename and "Replicate Name" in df.columns:
-        # Strip common suffixes from mzML filename
-        base_name = mzml_filename
-        for suffix in ["_uncalibrated", "-mars", ".mzML", ".raw"]:
-            base_name = base_name.replace(suffix, "")
+    # Load only the columns we need
+    cols_to_load = required_cols + [c for c in optional_cols if c in available_cols]
 
-        # Find matching rows
-        mask = (
-            df["Replicate Name"].astype(str).apply(lambda x: x in base_name or base_name in str(x))
-        )
-        if mask.sum() > 0:
-            df = df[mask]
-            logger.info(f"Filtered to {len(df)} rows matching '{base_name}'")
+    # Use pyarrow engine for much faster CSV reading (3-10x faster than default)
+    import time
 
-    # Filter to MS2 fragments only (exclude precursor)
-    df = df[df["Fragment Ion"] != "precursor"].copy()
-    logger.info(f"After filtering precursors: {len(df)} MS2 fragment rows")
+    start_time = time.time()
+    logger.info(f"Loading {len(cols_to_load)} columns from PRISM CSV (using pyarrow)...")
+    df = pd.read_csv(path, usecols=cols_to_load, engine="pyarrow")
+    elapsed = time.time() - start_time
+    logger.info(f"Loaded {len(df):,} rows from PRISM CSV in {elapsed:.1f}s")
 
-    # Parse fragment ion annotations (e.g., "y8", "b4", "y5++")
-    def parse_fragment_ion(ion_str: str) -> tuple[str, int, str]:
-        """Parse fragment ion string like 'y8', 'b4', 'y5-H2O'.
+    # Filter to specific replicate(s) if mzml_filename provided
+    # Filter to specific replicate(s) if mzml_filename provided
+    # Prioritize 'File Name' if available, otherwise use 'Replicate Name'
+    filter_col = "File Name" if "File Name" in df.columns else "Replicate Name"
 
-        Returns: (ion_type, ion_number, loss_type)
-        """
-        ion_str = str(ion_str)
+    if mzml_filename and filter_col in df.columns:
+        # Normalize to list
+        if isinstance(mzml_filename, str):
+            filenames = [mzml_filename]
+        else:
+            filenames = list(mzml_filename)
 
-        # Default values
-        ion_type = "?"
-        ion_number = 0
-        loss_type = "noloss"
+        # Strip common suffixes from mzML filenames to get base names
+        input_base_names = set()
+        for fname in filenames:
+            base_name = fname
+            for suffix in ["_uncalibrated", "-mars", ".mzML", ".raw"]:
+                base_name = base_name.replace(suffix, "")
+            input_base_names.add(base_name)
 
-        # Parse ion type (first letter)
-        if ion_str and ion_str[0] in "ybazcx":
-            ion_type = ion_str[0]
+        # Get unique values in the CSV (File Name or Replicate Name)
+        csv_values = df[filter_col].astype(str).unique()
+        n_csv_values = len(csv_values)
 
-        # Parse ion number (digits)
-        match = re.search(r"(\d+)", ion_str)
-        if match:
-            ion_number = int(match.group(1))
+        # Find which CSV values correspond to our input files
+        matched_values = []
+        for csv_val in csv_values:
+            csv_val_str = str(csv_val)
+            # Normalize CSV value too (remove extension if present)
+            csv_base = csv_val_str
+            for suffix in [".mzML", ".raw", ".wiff", ".d"]:
+                if csv_base.lower().endswith(suffix.lower()):
+                    csv_base = csv_base[: -len(suffix)]
 
-        # Parse neutral loss
-        if "-H2O" in ion_str or "-18" in ion_str:
-            loss_type = "H2O"
-        elif "-NH3" in ion_str or "-17" in ion_str:
-            loss_type = "NH3"
+            for input_name in input_base_names:
+                # Check exact match of base names first (strongest match)
+                if csv_base == input_name:
+                    matched_values.append(csv_val)
+                    break
+                # Then check substring match
+                elif csv_base in input_name or input_name in csv_base:
+                    matched_values.append(csv_val)
+                    break
 
-        return ion_type, ion_number, loss_type
+        n_matched = len(matched_values)
+
+        if n_matched > 0:
+            if n_matched < n_csv_values:
+                # Filter to the matching replicates
+                df = df[df[filter_col].isin(matched_values)]
+                logger.info(
+                    f"Filtered to {n_matched}/{n_csv_values} files ({len(df):,} rows) "
+                    f"using '{filter_col}' column"
+                )
+            else:
+                # All replicates matched
+                logger.info(f"All {n_csv_values} files in CSV match input ({len(df):,} rows)")
+        else:
+            # No rows matched
+            logger.warning(
+                f"Filtering failed! CSV contains {n_csv_values} files ({filter_col}) "
+                f"but none matched the {len(input_base_names)} input files."
+            )
+            # Debug info
+            logger.warning(
+                f"  Input file bases: {list(input_base_names)[:3]}{'...' if len(input_base_names) > 3 else ''}"
+            )
+            logger.warning(
+                f"  CSV values:       {list(csv_values)[:3]}{'...' if len(csv_values) > 3 else ''}"
+            )
+            logger.info(f"Using all {len(df):,} rows (no filtering applied)")
+
+    # Filter to MS2 fragments only (exclude precursor) - vectorized
+    df = df[df["Fragment Ion"] != "precursor"]
+    logger.info(f"After filtering precursors: {len(df):,} MS2 fragment rows")
+
+    if len(df) == 0:
+        logger.warning("No MS2 fragments found in library")
+        return []
+
+    # Vectorized fragment ion parsing
+    logger.info("Parsing fragment annotations...")
+    ion_series = df["Fragment Ion"].astype(str)
+
+    # Extract ion type (first character if y, b, a, z, c, x)
+    df["_ion_type"] = ion_series.str.extract(r"^([ybazcx])", expand=False).fillna("?")
+
+    # Extract ion number (first digits)
+    df["_ion_number"] = ion_series.str.extract(r"(\d+)", expand=False).fillna("0").astype(int)
+
+    # Extract loss type
+    df["_loss_type"] = "noloss"
+    df.loc[ion_series.str.contains(r"-H2O|-18", regex=True, na=False), "_loss_type"] = "H2O"
+    df.loc[ion_series.str.contains(r"-NH3|-17", regex=True, na=False), "_loss_type"] = "NH3"
 
     # Group by peptide+charge to create LibraryEntry objects
+    logger.info("Building library entries...")
     entries: list[LibraryEntry] = []
     peptide_col = "Peptide Modified Sequence Unimod Ids"
 
-    grouped = df.groupby([peptide_col, "Precursor Charge"])
+    # Pre-compute column indices for faster access
+    has_rt = "Retention Time" in df.columns
+    has_protein = "Protein Accession" in df.columns
+    has_area = "Area" in df.columns
 
-    for (mod_seq, prec_charge), group in grouped:
-        # Get precursor info from first row
+    grouped = df.groupby([peptide_col, "Precursor Charge"], sort=False)
+    n_groups = len(grouped)
+
+    for i, ((mod_seq, prec_charge), group) in enumerate(grouped):
+        if i % 50000 == 0 and i > 0:
+            logger.info(f"  Processed {i:,}/{n_groups:,} peptides...")
+
+        # Get precursor info from first row using iloc (faster than iterrows)
         first_row = group.iloc[0]
 
         entry = LibraryEntry(
@@ -467,45 +537,44 @@ def load_prism_library(
             stripped_sequence=strip_modifications(str(mod_seq)),
             precursor_charge=int(prec_charge),
             precursor_mz=float(first_row["Precursor Mz"]),
-            rt=float(first_row["Retention Time"]) if "Retention Time" in group.columns else None,
+            rt=float(first_row["Retention Time"])
+            if has_rt and pd.notna(first_row["Retention Time"])
+            else None,
             rt_start=float(first_row["Start Time"]) if pd.notna(first_row["Start Time"]) else None,
             rt_end=float(first_row["End Time"]) if pd.notna(first_row["End Time"]) else None,
         )
 
         # Add protein IDs if available
-        if "Protein Accession" in group.columns:
+        if has_protein:
             protein = first_row["Protein Accession"]
             if pd.notna(protein):
                 entry.protein_ids = [str(protein)]
 
-        # Add fragments
-        for _, row in group.iterrows():
-            ion_str = str(row["Fragment Ion"])
-            ion_type, ion_number, loss_type = parse_fragment_ion(ion_str)
-
-            # Use Product Mz as the theoretical m/z
-            product_mz = row["Product Mz"]
+        # Add fragments using itertuples (10x faster than iterrows)
+        for row in group.itertuples(index=False):
+            product_mz = row[group.columns.get_loc("Product Mz")]
             if pd.isna(product_mz) or product_mz <= 0:
                 continue
 
-            # Use Area as relative intensity if available
             intensity = 1.0
-            if "Area" in group.columns and pd.notna(row["Area"]):
-                intensity = float(row["Area"])
+            if has_area:
+                area = row[group.columns.get_loc("Area")]
+                if pd.notna(area):
+                    intensity = float(area)
 
-            # Get product charge
             product_charge = 1
-            if pd.notna(row["Product Charge"]):
-                product_charge = int(row["Product Charge"])
+            charge_val = row[group.columns.get_loc("Product Charge")]
+            if pd.notna(charge_val):
+                product_charge = int(charge_val)
 
             entry.fragments.append(
                 Fragment(
                     mz=float(product_mz),
                     intensity=intensity,
-                    ion_type=ion_type,
-                    ion_number=ion_number,
+                    ion_type=row[group.columns.get_loc("_ion_type")],
+                    ion_number=row[group.columns.get_loc("_ion_number")],
                     charge=product_charge,
-                    loss_type=loss_type,
+                    loss_type=row[group.columns.get_loc("_loss_type")],
                 )
             )
 
@@ -513,6 +582,6 @@ def load_prism_library(
             entries.append(entry)
 
     logger.info(
-        f"Loaded {len(entries)} peptides with {sum(len(e.fragments) for e in entries)} fragments from PRISM CSV"
+        f"Loaded {len(entries):,} peptides with {sum(len(e.fragments) for e in entries):,} fragments from PRISM CSV"
     )
     return entries

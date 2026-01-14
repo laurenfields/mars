@@ -63,6 +63,7 @@ def find_most_intense_peak(
     intensity_array: np.ndarray,
     tolerance: float,
     min_intensity: float = 0.0,
+    tolerance_ppm: float | None = None,
 ) -> tuple[float, float] | None:
     """Find the most intense peak within tolerance of target m/z.
 
@@ -70,8 +71,9 @@ def find_most_intense_peak(
         target_mz: Expected m/z value
         mz_array: Array of observed m/z values (sorted)
         intensity_array: Array of observed intensities
-        tolerance: Maximum allowed delta m/z
+        tolerance: Maximum allowed delta m/z in Th (ignored if tolerance_ppm is set)
         min_intensity: Minimum intensity threshold
+        tolerance_ppm: Maximum allowed delta m/z in ppm (overrides tolerance if set)
 
     Returns:
         Tuple of (observed_mz, intensity) or None if no match
@@ -79,9 +81,15 @@ def find_most_intense_peak(
     if len(mz_array) == 0:
         return None
 
+    # Calculate effective tolerance in Th
+    if tolerance_ppm is not None:
+        effective_tolerance = target_mz * tolerance_ppm / 1e6
+    else:
+        effective_tolerance = tolerance
+
     # Find range of indices within tolerance using binary search
-    low_mz = target_mz - tolerance
-    high_mz = target_mz + tolerance
+    low_mz = target_mz - effective_tolerance
+    high_mz = target_mz + effective_tolerance
 
     low_idx = np.searchsorted(mz_array, low_mz, side="left")
     high_idx = np.searchsorted(mz_array, high_mz, side="right")
@@ -277,6 +285,7 @@ def match_library_to_spectra(
     max_isolation_window_width: float | None = None,
     temperature_data: dict | None = None,
     show_progress: bool = True,
+    tolerance_ppm: float | None = None,
 ) -> pd.DataFrame:
     """Match library fragments to measured spectra within RT and precursor windows.
 
@@ -292,7 +301,8 @@ def match_library_to_spectra(
     Args:
         library: List of LibraryEntry objects with expected fragments
         spectra: Iterator of DIASpectrum objects from mzML
-        mz_tolerance: Maximum delta m/z for matching (default: ±0.7 Th)
+        mz_tolerance: Maximum delta m/z for matching in Th (default: ±0.7 Th)
+                     Ignored if tolerance_ppm is specified.
         min_intensity: Minimum observed intensity to use (default: 500)
         min_rt: Minimum RT to process (minutes)
         max_rt: Maximum RT to process (minutes)
@@ -301,13 +311,20 @@ def match_library_to_spectra(
                                     to ignore wide 20-30 m/z windows and only process narrow bins)
         temperature_data: Dict mapping source names (e.g., 'RFA2', 'RFC2') to TemperatureData objects
         show_progress: Show progress bar
+        tolerance_ppm: Maximum delta m/z for matching in ppm (e.g., 10.0 for ±10 ppm).
+                      If specified, overrides mz_tolerance (Th).
 
     Returns:
         DataFrame with one row per matched fragment
     """
-    logger.info(
-        f"Matching library fragments with tolerance ±{mz_tolerance} Th, min intensity {min_intensity}"
-    )
+    if tolerance_ppm is not None:
+        logger.info(
+            f"Matching library fragments with tolerance ±{tolerance_ppm} ppm, min intensity {min_intensity}"
+        )
+    else:
+        logger.info(
+            f"Matching library fragments with tolerance ±{mz_tolerance} Th, min intensity {min_intensity}"
+        )
 
     # Build precursor index for efficient lookup
     # Group library entries by precursor m/z bins
@@ -394,6 +411,7 @@ def match_library_to_spectra(
                     spectrum.intensity_array,
                     mz_tolerance,
                     min_intensity,
+                    tolerance_ppm=tolerance_ppm,
                 )
 
                 if result is None:
@@ -401,6 +419,8 @@ def match_library_to_spectra(
 
                 observed_mz, observed_intensity = result
                 delta_mz = observed_mz - fragment.mz
+                # Calculate delta in ppm (parts per million)
+                delta_ppm = (delta_mz / fragment.mz) * 1e6
 
                 # Calculate log-transformed features
                 log_tic = float(np.log10(np.clip(spectrum.tic, 1, None)))
@@ -482,6 +502,7 @@ def match_library_to_spectra(
                         "observed_mz": observed_mz,
                         "observed_intensity": observed_intensity,
                         "delta_mz": delta_mz,
+                        "delta_ppm": delta_ppm,
                         "precursor_mz": spectrum.precursor_mz_center,
                         "fragment_mz": fragment.mz,
                         "fragment_charge": fragment.charge,
@@ -529,15 +550,23 @@ def match_library_to_spectra(
     df = pd.DataFrame(matches)
 
     if len(df) > 0:
-        logger.info("Delta m/z statistics:")
+        logger.info("Delta m/z statistics (Th):")
         logger.info(f"  Mean:   {df['delta_mz'].mean():.4f} Th")
         logger.info(f"  Median: {df['delta_mz'].median():.4f} Th")
         logger.info(f"  Std:    {df['delta_mz'].std():.4f} Th")
 
+        logger.info("Delta m/z statistics (ppm):")
+        logger.info(f"  Mean:   {df['delta_ppm'].mean():.2f} ppm")
+        logger.info(f"  Median: {df['delta_ppm'].median():.2f} ppm")
+        logger.info(f"  Std:    {df['delta_ppm'].std():.2f} ppm")
+
         # Intensity-weighted statistics
         weights = df["observed_intensity"].values
-        weighted_mean = np.average(df["delta_mz"].values, weights=weights)
-        logger.info(f"  Intensity-weighted mean: {weighted_mean:.4f} Th")
+        weighted_mean_th = np.average(df["delta_mz"].values, weights=weights)
+        weighted_mean_ppm = np.average(df["delta_ppm"].values, weights=weights)
+        logger.info(
+            f"  Intensity-weighted mean: {weighted_mean_th:.4f} Th ({weighted_mean_ppm:.2f} ppm)"
+        )
 
     return df
 
@@ -602,5 +631,7 @@ def apply_calibration_to_matches(
     # Apply corrections
     df["delta_mz_calibrated"] = df["delta_mz"] - corrections
     df["mz_correction"] = corrections
+    # Calculate calibrated delta in ppm
+    df["delta_ppm_calibrated"] = (df["delta_mz_calibrated"] / df["fragment_mz"]) * 1e6
 
     return df

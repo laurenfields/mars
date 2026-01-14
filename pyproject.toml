@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mars-ms"
-version = "0.1.1"
+version = "0.1.2"
 description = "Mass Accuracy Recalibration System"
 readme = "README.md"
 license = {text = "MIT"}
@@ -26,6 +26,7 @@ classifiers = [
 dependencies = [
     "numpy>=1.24",
     "pandas>=2.0",
+    "pyarrow>=14.0",  # Fast CSV reading
     "pyteomics>=4.6",
     "xgboost>=2.0",
     "scikit-learn>=1.3",

@@ -1,6 +1,6 @@
 """Mars: Mass Accuracy Recalibration System for Thermo Stellar DIA data."""
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 from mars.calibration import MzCalibrator
 from mars.library import Fragment, LibraryEntry, load_blib
