@@ -88,7 +88,8 @@ mars calibrate --mzml-dir /path/to/data/ --library library.blib --output-dir out
 | `--mzml-dir` | - | Directory containing mzML files |
 | `--library` | - | Path to blib spectral library (ignored if using PRISM Skyline Report) |
 | `--prism-csv` | - | PRISM Skyline CSV with Start/End Time columns |
-| `--tolerance` | 0.7 | m/z tolerance for matching (Th) |
+| `--tolerance` | 0.7 | m/z tolerance for matching (Th), ignored if `--tolerance-ppm` is set |
+| `--tolerance-ppm` | - | m/z tolerance for matching in ppm (e.g., 10 for Astral), overrides `--tolerance` |
 | `--min-intensity` | 500 | Minimum peak intensity for matching |
 | `--max-isolation-window` | - | Maximum isolation window width (m/z) to include |
 | `--temperature-dir` | - | Directory with RF temperature CSV files |
@@ -145,16 +146,22 @@ The XGBoost model uses up to 16 features to predict m/z corrections:
 6. `injection_time` - Ion injection time (seconds)
 7. `tic_injection_time` - TIC × injection time product
 8. `fragment_ions` - Fragment intensity × injection time (total ions, not rate)
-9. `ions_above_0_1` - Total ions in (X, X+1] Th range above fragment m/z
-10. `ions_above_1_2` - Total ions in (X+1, X+2] Th range above fragment m/z
-11. `ions_above_2_3` - Total ions in (X+2, X+3] Th range above fragment m/z
-12. `adjacent_ratio_0_1` - ions_above_0_1 / fragment_ions (relative adjacent density)
-13. `adjacent_ratio_1_2` - ions_above_1_2 / fragment_ions
-14. `adjacent_ratio_2_3` - ions_above_2_3 / fragment_ions
-15. `rfa2_temp` - RF amplifier temperature (°C)
-16. `rfc2_temp` - RF electronics temperature (°C)
+9. `ions_above_0_1` - Total ions in (X+0.5, X+1.5] Th range above fragment m/z
+10. `ions_above_1_2` - Total ions in (X+1.5, X+2.5] Th range above fragment m/z
+11. `ions_above_2_3` - Total ions in (X+2.5, X+3.5] Th range above fragment m/z
+12. `ions_below_0_1` - Total ions in (X-1.5, X-0.5] Th range below fragment m/z
+13. `ions_below_1_2` - Total ions in (X-2.5, X-1.5] Th range below fragment m/z
+14. `ions_below_2_3` - Total ions in (X-3.5, X-2.5] Th range below fragment m/z
+15. `adjacent_ratio_0_1` - ions_above_0_1 / fragment_ions (relative adjacent density)
+16. `adjacent_ratio_1_2` - ions_above_1_2 / fragment_ions
+17. `adjacent_ratio_2_3` - ions_above_2_3 / fragment_ions
+18. `adjacent_ratio_below_0_1` - ions_below_0_1 / fragment_ions
+19. `adjacent_ratio_below_1_2` - ions_below_1_2 / fragment_ions
+20. `adjacent_ratio_below_2_3` - ions_below_2_3 / fragment_ions
+21. `rfa2_temp` - RF amplifier temperature (°C)
+22. `rfc2_temp` - RF electronics temperature (°C)
 
-**Note**: Features 6-14 are only included if injection time data is available in the mzML files. Features 15-16 are only included if temperature CSV files are provided. Features with universally missing data are automatically excluded.
+**Note**: Features 6-20 are only included if injection time data is available in the mzML files. Features 21-22 are only included if temperature CSV files are provided. Features with universally missing data are automatically excluded.
 
 ## RF Temperature Data
 

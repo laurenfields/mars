@@ -169,7 +169,14 @@ class MzCalibrator:
                 feature_data["fragment_ions"] = df["fragment_ions"].values
 
             # Check adjacent ion population features (only if injection_time is available)
-            for ions_col in ["ions_above_0_1", "ions_above_1_2", "ions_above_2_3"]:
+            for ions_col in [
+                "ions_above_0_1",
+                "ions_above_1_2",
+                "ions_above_2_3",
+                "ions_below_0_1",
+                "ions_below_1_2",
+                "ions_below_2_3",
+            ]:
                 if ions_col in df.columns and df[ions_col].notna().any():
                     if df[ions_col].isna().any():
                         n_before = len(df)
@@ -187,7 +194,14 @@ class MzCalibrator:
                     feature_data[ions_col] = df[ions_col].values
 
             # Check adjacent ratio features (only if fragment_ions is available)
-            for ratio_col in ["adjacent_ratio_0_1", "adjacent_ratio_1_2", "adjacent_ratio_2_3"]:
+            for ratio_col in [
+                "adjacent_ratio_0_1",
+                "adjacent_ratio_1_2",
+                "adjacent_ratio_2_3",
+                "adjacent_ratio_below_0_1",
+                "adjacent_ratio_below_1_2",
+                "adjacent_ratio_below_2_3",
+            ]:
                 if ratio_col in df.columns and df[ratio_col].notna().any():
                     if df[ratio_col].isna().any():
                         n_before = len(df)
@@ -391,6 +405,33 @@ class MzCalibrator:
             Function that takes (metadata, mz_array, intensity_array) and returns calibrated mz_array
         """
 
+        def _compute_ions_in_range_vectorized(
+            mz_array: np.ndarray,
+            cumsum: np.ndarray,
+            offset_low: float,
+            offset_high: float,
+        ) -> np.ndarray:
+            """Compute sum of intensities in m/z range for each peak (fully vectorized).
+
+            For each m/z value x[i], computes sum of intensities in range
+            (x[i] + offset_low, x[i] + offset_high].
+
+            Args:
+                mz_array: Sorted array of m/z values
+                cumsum: Cumulative sum of intensities (prepended with 0)
+                offset_low: Lower offset from m/z (exclusive)
+                offset_high: Upper offset from m/z (inclusive)
+
+            Returns:
+                Array of intensity sums for each peak
+            """
+            # Fully vectorized: searchsorted can take arrays as second argument
+            low_mz = mz_array + offset_low
+            high_mz = mz_array + offset_high
+            low_idx = np.searchsorted(mz_array, low_mz, side="right")
+            high_idx = np.searchsorted(mz_array, high_mz, side="right")
+            return cumsum[high_idx] - cumsum[low_idx]
+
         def calibrate(
             metadata: dict, mz_array: np.ndarray, intensity_array: np.ndarray | None = None
         ) -> np.ndarray:
@@ -414,6 +455,92 @@ class MzCalibrator:
             if intensity_array is None or len(intensity_array) != n:
                 intensity_array = np.full(n, 1000.0)  # Default moderate intensity
 
+            injection_time = metadata.get("injection_time", 0.0)
+
+            # Check if we need space charge features
+            space_charge_features = {
+                "ions_above_0_1",
+                "ions_above_1_2",
+                "ions_above_2_3",
+                "ions_below_0_1",
+                "ions_below_1_2",
+                "ions_below_2_3",
+                "adjacent_ratio_0_1",
+                "adjacent_ratio_1_2",
+                "adjacent_ratio_2_3",
+                "adjacent_ratio_below_0_1",
+                "adjacent_ratio_below_1_2",
+                "adjacent_ratio_below_2_3",
+            }
+            need_space_charge = bool(space_charge_features & set(self.feature_names))
+
+            # Pre-compute space charge features if needed
+            space_charge_data = {}
+            if need_space_charge and injection_time > 0:
+                # Build cumulative sum for efficient range queries
+                cumsum = np.zeros(n + 1)
+                cumsum[1:] = np.cumsum(intensity_array)
+
+                # Compute ions above features (fully vectorized)
+                ions_above_0_1 = (
+                    _compute_ions_in_range_vectorized(mz_array, cumsum, 0.5, 1.5)
+                    * injection_time
+                )
+                ions_above_1_2 = (
+                    _compute_ions_in_range_vectorized(mz_array, cumsum, 1.5, 2.5)
+                    * injection_time
+                )
+                ions_above_2_3 = (
+                    _compute_ions_in_range_vectorized(mz_array, cumsum, 2.5, 3.5)
+                    * injection_time
+                )
+
+                # Compute ions below features (fully vectorized)
+                ions_below_0_1 = (
+                    _compute_ions_in_range_vectorized(mz_array, cumsum, -1.5, -0.5)
+                    * injection_time
+                )
+                ions_below_1_2 = (
+                    _compute_ions_in_range_vectorized(mz_array, cumsum, -2.5, -1.5)
+                    * injection_time
+                )
+                ions_below_2_3 = (
+                    _compute_ions_in_range_vectorized(mz_array, cumsum, -3.5, -2.5)
+                    * injection_time
+                )
+
+                # Store in dict
+                space_charge_data["ions_above_0_1"] = ions_above_0_1
+                space_charge_data["ions_above_1_2"] = ions_above_1_2
+                space_charge_data["ions_above_2_3"] = ions_above_2_3
+                space_charge_data["ions_below_0_1"] = ions_below_0_1
+                space_charge_data["ions_below_1_2"] = ions_below_1_2
+                space_charge_data["ions_below_2_3"] = ions_below_2_3
+
+                # Compute fragment_ions for ratio calculations
+                fragment_ions = intensity_array * injection_time
+
+                # Compute ratio features (avoid division by zero)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    space_charge_data["adjacent_ratio_0_1"] = np.where(
+                        fragment_ions > 0, ions_above_0_1 / fragment_ions, 0.0
+                    )
+                    space_charge_data["adjacent_ratio_1_2"] = np.where(
+                        fragment_ions > 0, ions_above_1_2 / fragment_ions, 0.0
+                    )
+                    space_charge_data["adjacent_ratio_2_3"] = np.where(
+                        fragment_ions > 0, ions_above_2_3 / fragment_ions, 0.0
+                    )
+                    space_charge_data["adjacent_ratio_below_0_1"] = np.where(
+                        fragment_ions > 0, ions_below_0_1 / fragment_ions, 0.0
+                    )
+                    space_charge_data["adjacent_ratio_below_1_2"] = np.where(
+                        fragment_ions > 0, ions_below_1_2 / fragment_ions, 0.0
+                    )
+                    space_charge_data["adjacent_ratio_below_2_3"] = np.where(
+                        fragment_ions > 0, ions_below_2_3 / fragment_ions, 0.0
+                    )
+
             # Build feature arrays for prediction
             feature_data = {}
 
@@ -430,19 +557,20 @@ class MzCalibrator:
                 elif feat == "absolute_time":
                     feature_data[feat] = np.full(n, metadata.get("absolute_time", 0.0))
                 elif feat == "injection_time":
-                    feature_data[feat] = np.full(n, metadata.get("injection_time", 0.0))
+                    feature_data[feat] = np.full(n, injection_time)
                 elif feat == "tic_injection_time":
                     tic = metadata.get("tic", 1e6)
-                    injection_time = metadata.get("injection_time", 0.0)
                     feature_data[feat] = np.full(n, tic * injection_time)
                 elif feat == "fragment_ions":
                     # fragment_ions = intensity × injection_time
-                    injection_time = metadata.get("injection_time", 0.0)
                     feature_data[feat] = intensity_array * injection_time
                 elif feat == "rfa2_temp":
                     feature_data[feat] = np.full(n, metadata.get("rfa2_temp", 0.0))
                 elif feat == "rfc2_temp":
                     feature_data[feat] = np.full(n, metadata.get("rfc2_temp", 0.0))
+                elif feat in space_charge_data:
+                    # Use pre-computed space charge features
+                    feature_data[feat] = space_charge_data[feat]
                 else:
                     # Unknown feature - use default of 0
                     feature_data[feat] = np.full(n, 0.0)

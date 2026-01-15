@@ -13,7 +13,7 @@ Mars uses a machine learning approach to predict m/z corrections based on:
 - **Spectrum TIC**: Space charge effects from high ion current
 - **Ion injection time**: Signal accumulation duration effects
 - **Precursor m/z**: DIA isolation window-specific effects
-- **Adjacent ion population**: Ion density in neighboring m/z ranges (0-1, 1-2, 2-3 Th above)
+- **Adjacent ion population**: Ion density in neighboring m/z ranges (0.5-1.5, 1.5-2.5, 2.5-3.5 Th above)
 - **Adjacent ion ratios**: Relative ion density (adjacent ions / fragment ions)
 - **RF temperatures**: Thermal effects from RF amplifier (RFA2) and electronics (RFC2)
 

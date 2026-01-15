@@ -328,8 +328,27 @@ def plot_feature_importance(
     if not importance:
         raise ValueError("No feature importance in model. Train model first.")
 
+    # Map feature names to display names
+    display_name_map = {
+        "ions_above_0_1": "ions_above_0.5_1.5",
+        "ions_above_1_2": "ions_above_1.5_2.5",
+        "ions_above_2_3": "ions_above_2.5_3.5",
+        "ions_below_0_1": "ions_below_-1.5_-0.5",
+        "ions_below_1_2": "ions_below_-2.5_-1.5",
+        "ions_below_2_3": "ions_below_-3.5_-2.5",
+        "adjacent_ratio_0_1": "adjacent_ratio_0.5_1.5",
+        "adjacent_ratio_1_2": "adjacent_ratio_1.5_2.5",
+        "adjacent_ratio_2_3": "adjacent_ratio_2.5_3.5",
+        "adjacent_ratio_below_0_1": "adjacent_ratio_-1.5_-0.5",
+        "adjacent_ratio_below_1_2": "adjacent_ratio_-2.5_-1.5",
+        "adjacent_ratio_below_2_3": "adjacent_ratio_-3.5_-2.5",
+    }
+
     features = list(importance.keys())
     values = list(importance.values())
+
+    # Replace feature names with display names
+    features = [display_name_map.get(f, f) for f in features]
 
     # Sort by importance
     sorted_idx = np.argsort(values)
@@ -1032,7 +1051,7 @@ def plot_adjacent_ion_feature_vs_error(
     before: pd.DataFrame,
     after: pd.DataFrame | None = None,
     feature_col: str = "ions_above_0_1",
-    feature_label: str = "Ions Above (0-1 Th)",
+    feature_label: str = "Ions Above (0.5-1.5 Th)",
     output_path: Path | str | None = None,
     title: str | None = None,
     ylim: tuple[float, float] | None = None,
@@ -1293,12 +1312,12 @@ def generate_qc_report(
     # Adjacent ion feature plots (if available)
     # ions_above_0_1 vs error
     if "ions_above_0_1" in before.columns and before["ions_above_0_1"].notna().any():
-        ions_0_1_path = output_dir / f"{file_prefix}_ions_above_0_1_vs_error.png"
+        ions_0_1_path = output_dir / f"{file_prefix}_ions_above_0.5_1.5_vs_error.png"
         plot_adjacent_ion_feature_vs_error(
             before,
             after,
             feature_col="ions_above_0_1",
-            feature_label="Ions Above (0-1 Th)",
+            feature_label="Ions Above (0.5-1.5 Th)",
             output_path=ions_0_1_path,
             use_log_scale=True,
             use_ppm=use_ppm,
@@ -1309,12 +1328,12 @@ def generate_qc_report(
 
     # ions_above_1_2 vs error
     if "ions_above_1_2" in before.columns and before["ions_above_1_2"].notna().any():
-        ions_1_2_path = output_dir / f"{file_prefix}_ions_above_1_2_vs_error.png"
+        ions_1_2_path = output_dir / f"{file_prefix}_ions_above_1.5_2.5_vs_error.png"
         plot_adjacent_ion_feature_vs_error(
             before,
             after,
             feature_col="ions_above_1_2",
-            feature_label="Ions Above (1-2 Th)",
+            feature_label="Ions Above (1.5-2.5 Th)",
             output_path=ions_1_2_path,
             use_log_scale=True,
             use_ppm=use_ppm,
@@ -1325,12 +1344,12 @@ def generate_qc_report(
 
     # ions_above_2_3 vs error
     if "ions_above_2_3" in before.columns and before["ions_above_2_3"].notna().any():
-        ions_2_3_path = output_dir / f"{file_prefix}_ions_above_2_3_vs_error.png"
+        ions_2_3_path = output_dir / f"{file_prefix}_ions_above_2.5_3.5_vs_error.png"
         plot_adjacent_ion_feature_vs_error(
             before,
             after,
             feature_col="ions_above_2_3",
-            feature_label="Ions Above (2-3 Th)",
+            feature_label="Ions Above (2.5-3.5 Th)",
             output_path=ions_2_3_path,
             use_log_scale=True,
             use_ppm=use_ppm,
@@ -1341,12 +1360,12 @@ def generate_qc_report(
 
     # adjacent_ratio_0_1 vs error
     if "adjacent_ratio_0_1" in before.columns and before["adjacent_ratio_0_1"].notna().any():
-        ratio_0_1_path = output_dir / f"{file_prefix}_adjacent_ratio_0_1_vs_error.png"
+        ratio_0_1_path = output_dir / f"{file_prefix}_adjacent_ratio_0.5_1.5_vs_error.png"
         plot_adjacent_ion_feature_vs_error(
             before,
             after,
             feature_col="adjacent_ratio_0_1",
-            feature_label="Adjacent Ratio (0-1 Th)",
+            feature_label="Adjacent Ratio (0.5-1.5 Th)",
             output_path=ratio_0_1_path,
             use_log_scale=True,
             use_ppm=use_ppm,
@@ -1357,12 +1376,12 @@ def generate_qc_report(
 
     # adjacent_ratio_1_2 vs error
     if "adjacent_ratio_1_2" in before.columns and before["adjacent_ratio_1_2"].notna().any():
-        ratio_1_2_path = output_dir / f"{file_prefix}_adjacent_ratio_1_2_vs_error.png"
+        ratio_1_2_path = output_dir / f"{file_prefix}_adjacent_ratio_1.5_2.5_vs_error.png"
         plot_adjacent_ion_feature_vs_error(
             before,
             after,
             feature_col="adjacent_ratio_1_2",
-            feature_label="Adjacent Ratio (1-2 Th)",
+            feature_label="Adjacent Ratio (1.5-2.5 Th)",
             output_path=ratio_1_2_path,
             use_log_scale=True,
             use_ppm=use_ppm,
@@ -1373,18 +1392,114 @@ def generate_qc_report(
 
     # adjacent_ratio_2_3 vs error
     if "adjacent_ratio_2_3" in before.columns and before["adjacent_ratio_2_3"].notna().any():
-        ratio_2_3_path = output_dir / f"{file_prefix}_adjacent_ratio_2_3_vs_error.png"
+        ratio_2_3_path = output_dir / f"{file_prefix}_adjacent_ratio_2.5_3.5_vs_error.png"
         plot_adjacent_ion_feature_vs_error(
             before,
             after,
             feature_col="adjacent_ratio_2_3",
-            feature_label="Adjacent Ratio (2-3 Th)",
+            feature_label="Adjacent Ratio (2.5-3.5 Th)",
             output_path=ratio_2_3_path,
             use_log_scale=True,
             use_ppm=use_ppm,
             ylim=ylim,
         )
         generated_files.append(ratio_2_3_path)
+        plt.close()
+
+    # ions_below_0_1 vs error
+    if "ions_below_0_1" in before.columns and before["ions_below_0_1"].notna().any():
+        ions_below_0_1_path = output_dir / f"{file_prefix}_ions_below_-1.5_-0.5_vs_error.png"
+        plot_adjacent_ion_feature_vs_error(
+            before,
+            after,
+            feature_col="ions_below_0_1",
+            feature_label="Ions Below (-1.5 to -0.5 Th)",
+            output_path=ions_below_0_1_path,
+            use_log_scale=True,
+            use_ppm=use_ppm,
+            ylim=ylim,
+        )
+        generated_files.append(ions_below_0_1_path)
+        plt.close()
+
+    # ions_below_1_2 vs error
+    if "ions_below_1_2" in before.columns and before["ions_below_1_2"].notna().any():
+        ions_below_1_2_path = output_dir / f"{file_prefix}_ions_below_-2.5_-1.5_vs_error.png"
+        plot_adjacent_ion_feature_vs_error(
+            before,
+            after,
+            feature_col="ions_below_1_2",
+            feature_label="Ions Below (-2.5 to -1.5 Th)",
+            output_path=ions_below_1_2_path,
+            use_log_scale=True,
+            use_ppm=use_ppm,
+            ylim=ylim,
+        )
+        generated_files.append(ions_below_1_2_path)
+        plt.close()
+
+    # ions_below_2_3 vs error
+    if "ions_below_2_3" in before.columns and before["ions_below_2_3"].notna().any():
+        ions_below_2_3_path = output_dir / f"{file_prefix}_ions_below_-3.5_-2.5_vs_error.png"
+        plot_adjacent_ion_feature_vs_error(
+            before,
+            after,
+            feature_col="ions_below_2_3",
+            feature_label="Ions Below (-3.5 to -2.5 Th)",
+            output_path=ions_below_2_3_path,
+            use_log_scale=True,
+            use_ppm=use_ppm,
+            ylim=ylim,
+        )
+        generated_files.append(ions_below_2_3_path)
+        plt.close()
+
+    # adjacent_ratio_below_0_1 vs error
+    if "adjacent_ratio_below_0_1" in before.columns and before["adjacent_ratio_below_0_1"].notna().any():
+        ratio_below_0_1_path = output_dir / f"{file_prefix}_adjacent_ratio_-1.5_-0.5_vs_error.png"
+        plot_adjacent_ion_feature_vs_error(
+            before,
+            after,
+            feature_col="adjacent_ratio_below_0_1",
+            feature_label="Adjacent Ratio (-1.5 to -0.5 Th)",
+            output_path=ratio_below_0_1_path,
+            use_log_scale=True,
+            use_ppm=use_ppm,
+            ylim=ylim,
+        )
+        generated_files.append(ratio_below_0_1_path)
+        plt.close()
+
+    # adjacent_ratio_below_1_2 vs error
+    if "adjacent_ratio_below_1_2" in before.columns and before["adjacent_ratio_below_1_2"].notna().any():
+        ratio_below_1_2_path = output_dir / f"{file_prefix}_adjacent_ratio_-2.5_-1.5_vs_error.png"
+        plot_adjacent_ion_feature_vs_error(
+            before,
+            after,
+            feature_col="adjacent_ratio_below_1_2",
+            feature_label="Adjacent Ratio (-2.5 to -1.5 Th)",
+            output_path=ratio_below_1_2_path,
+            use_log_scale=True,
+            use_ppm=use_ppm,
+            ylim=ylim,
+        )
+        generated_files.append(ratio_below_1_2_path)
+        plt.close()
+
+    # adjacent_ratio_below_2_3 vs error
+    if "adjacent_ratio_below_2_3" in before.columns and before["adjacent_ratio_below_2_3"].notna().any():
+        ratio_below_2_3_path = output_dir / f"{file_prefix}_adjacent_ratio_-3.5_-2.5_vs_error.png"
+        plot_adjacent_ion_feature_vs_error(
+            before,
+            after,
+            feature_col="adjacent_ratio_below_2_3",
+            feature_label="Adjacent Ratio (-3.5 to -2.5 Th)",
+            output_path=ratio_below_2_3_path,
+            use_log_scale=True,
+            use_ppm=use_ppm,
+            ylim=ylim,
+        )
+        generated_files.append(ratio_below_2_3_path)
         plt.close()
 
     # Feature importance

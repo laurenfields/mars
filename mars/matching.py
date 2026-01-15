@@ -450,31 +450,61 @@ def match_library_to_spectra(
                         rfc2_temp = temperature_data["RFC2"].get_temperature_at_time(spectrum.rt)
 
                 # Calculate adjacent ion population features
-                # For measured m/z = X, sum intensity in ranges above X and multiply by injection_time
+                # For monoisotopic m/z = X, sum intensity in ranges offset by 0.5 Th to center on isotope pattern
                 ions_above_0_1 = None
                 ions_above_1_2 = None
                 ions_above_2_3 = None
                 if spectrum.injection_time is not None:
-                    # Use observed_mz as X (the measured position in the spectrum)
-                    x = observed_mz
-                    # (X, X+1] range
+                    # Use fragment.mz as X (the expected monoisotopic m/z)
+                    x = fragment.mz
+                    # (X+0.5, X+1.5] range - centered on first isotope region
                     ions_above_0_1 = (
                         sum_intensity_in_range(
-                            spectrum.mz_array, spectrum.intensity_array, x, x + 1.0
+                            spectrum.mz_array, spectrum.intensity_array, x + 0.5, x + 1.5
                         )
                         * spectrum.injection_time
                     )
-                    # (X+1, X+2] range
+                    # (X+1.5, X+2.5] range - centered on second isotope region
                     ions_above_1_2 = (
                         sum_intensity_in_range(
-                            spectrum.mz_array, spectrum.intensity_array, x + 1.0, x + 2.0
+                            spectrum.mz_array, spectrum.intensity_array, x + 1.5, x + 2.5
                         )
                         * spectrum.injection_time
                     )
-                    # (X+2, X+3] range
+                    # (X+2.5, X+3.5] range - centered on third isotope region
                     ions_above_2_3 = (
                         sum_intensity_in_range(
-                            spectrum.mz_array, spectrum.intensity_array, x + 2.0, x + 3.0
+                            spectrum.mz_array, spectrum.intensity_array, x + 2.5, x + 3.5
+                        )
+                        * spectrum.injection_time
+                    )
+
+                # Calculate adjacent ion population features BELOW the fragment
+                # For monoisotopic m/z = X, sum intensity in ranges offset by 0.5 Th
+                ions_below_0_1 = None
+                ions_below_1_2 = None
+                ions_below_2_3 = None
+                if spectrum.injection_time is not None:
+                    # Use fragment.mz as X (the expected monoisotopic m/z)
+                    x = fragment.mz
+                    # (X-1.5, X-0.5] range - centered on first region below
+                    ions_below_0_1 = (
+                        sum_intensity_in_range(
+                            spectrum.mz_array, spectrum.intensity_array, x - 1.5, x - 0.5
+                        )
+                        * spectrum.injection_time
+                    )
+                    # (X-2.5, X-1.5] range - centered on second region below
+                    ions_below_1_2 = (
+                        sum_intensity_in_range(
+                            spectrum.mz_array, spectrum.intensity_array, x - 2.5, x - 1.5
+                        )
+                        * spectrum.injection_time
+                    )
+                    # (X-3.5, X-2.5] range - centered on third region below
+                    ions_below_2_3 = (
+                        sum_intensity_in_range(
+                            spectrum.mz_array, spectrum.intensity_array, x - 3.5, x - 2.5
                         )
                         * spectrum.injection_time
                     )
@@ -484,6 +514,9 @@ def match_library_to_spectra(
                 adjacent_ratio_0_1 = None
                 adjacent_ratio_1_2 = None
                 adjacent_ratio_2_3 = None
+                adjacent_ratio_below_0_1 = None
+                adjacent_ratio_below_1_2 = None
+                adjacent_ratio_below_2_3 = None
                 if fragment_ions is not None and fragment_ions > 0:
                     if ions_above_0_1 is not None:
                         adjacent_ratio_0_1 = ions_above_0_1 / fragment_ions
@@ -491,6 +524,12 @@ def match_library_to_spectra(
                         adjacent_ratio_1_2 = ions_above_1_2 / fragment_ions
                     if ions_above_2_3 is not None:
                         adjacent_ratio_2_3 = ions_above_2_3 / fragment_ions
+                    if ions_below_0_1 is not None:
+                        adjacent_ratio_below_0_1 = ions_below_0_1 / fragment_ions
+                    if ions_below_1_2 is not None:
+                        adjacent_ratio_below_1_2 = ions_below_1_2 / fragment_ions
+                    if ions_below_2_3 is not None:
+                        adjacent_ratio_below_2_3 = ions_below_2_3 / fragment_ions
 
                 # Create match record
                 ion_annotation = f"{fragment.ion_type}{fragment.ion_number}+{fragment.charge}"
@@ -515,9 +554,15 @@ def match_library_to_spectra(
                         "ions_above_0_1": ions_above_0_1,
                         "ions_above_1_2": ions_above_1_2,
                         "ions_above_2_3": ions_above_2_3,
+                        "ions_below_0_1": ions_below_0_1,
+                        "ions_below_1_2": ions_below_1_2,
+                        "ions_below_2_3": ions_below_2_3,
                         "adjacent_ratio_0_1": adjacent_ratio_0_1,
                         "adjacent_ratio_1_2": adjacent_ratio_1_2,
                         "adjacent_ratio_2_3": adjacent_ratio_2_3,
+                        "adjacent_ratio_below_0_1": adjacent_ratio_below_0_1,
+                        "adjacent_ratio_below_1_2": adjacent_ratio_below_1_2,
+                        "adjacent_ratio_below_2_3": adjacent_ratio_below_2_3,
                         "rfa2_temp": rfa2_temp,
                         "rfc2_temp": rfc2_temp,
                         "rt": spectrum.rt,
