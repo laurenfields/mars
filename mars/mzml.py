@@ -298,201 +298,273 @@ def write_calibrated_mzml(
 ) -> None:
     """Write calibrated mzML file with corrected m/z values.
 
+    Uses psims library to write properly indexed mzML files. Reads the original
+    file with pyteomics and writes with psims, modifying only MS2 m/z arrays.
+
     Args:
         input_path: Path to input mzML file
         output_path: Path for output mzML file
-        calibration_func: Function that takes (spectrum_metadata, mz_array)
+        calibration_func: Function that takes (spectrum_metadata, mz_array, intensity_array)
                          and returns calibrated mz_array
-        max_isolation_window_width: Maximum isolation window width (m/z) to process.
-                                    Spectra with wider windows are skipped
+        max_isolation_window_width: Maximum isolation window width (m/z) to include.
+                                    MS2 spectra with wider windows are excluded from output.
         temperature_data: Dict mapping source names (e.g., 'RFA2', 'RFC2') to TemperatureData objects
     """
+    import re
+
+    from psims.mzml import MzMLWriter
+
     input_path = Path(input_path)
     output_path = Path(output_path)
 
     logger.info(f"Writing calibrated mzML to {output_path}")
 
-    # For now, we'll use a simple approach: read, modify, write
-    # A more sophisticated approach would use streaming
-    import base64
-    import re
-    import struct as struct_module
-    import zlib as zlib_module
-
-    from lxml import etree
-
-    # Extract startTimeStamp from the file (for absolute_time calculation)
+    # Extract acquisition start time for absolute_time calculation
     acquisition_start_time = None
-    with open(input_path, encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            if "<run" in line and "startTimeStamp" in line:
-                match = re.search(r'startTimeStamp="([^"]+)"', line)
-                if match:
-                    acquisition_start_time = _parse_iso8601_timestamp(match.group(1))
-                break
-            if "</run>" in line or "<spectrumList" in line:
-                break
+    try:
+        with open(input_path, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if "startTimeStamp" in line:
+                    match = re.search(r'startTimeStamp="([^"]+)"', line)
+                    if match:
+                        acquisition_start_time = _parse_iso8601_timestamp(match.group(1))
+                    break
+                if "<spectrumList" in line:
+                    break
+    except Exception as e:
+        logger.debug(f"Failed to extract startTimeStamp: {e}")
 
-    # Parse XML
-    tree = etree.parse(str(input_path))
-    root = tree.getroot()
+    # Read all spectra from input file using pyteomics
+    all_spectra = []
+    with mzml.MzML(str(input_path)) as reader:
+        for spectrum in reader:
+            all_spectra.append(spectrum)
 
-    # Find namespace
-    ns = {"ms": root.nsmap.get(None, "http://psi.hupo.org/ms/mzml")}
-    ns_ms = ns["ms"]  # Helper for f-strings
+    logger.info(f"Read {len(all_spectra)} spectra from input file")
+
+    # Filter out wide-window MS2 spectra if max_isolation_window_width is set
+    spectra_data = []
+    n_skipped = 0
+    window_widths_seen = set()
+    for spectrum in all_spectra:
+        ms_level = spectrum.get("ms level", 1)
+        if ms_level == 2 and max_isolation_window_width is not None:
+            low, high, _ = _extract_isolation_window(spectrum)
+            window_width = high - low if high > 0 and low > 0 else 0
+            window_widths_seen.add(round(window_width, 1))
+            if window_width > max_isolation_window_width:
+                n_skipped += 1
+                continue
+        spectra_data.append(spectrum)
+
+    if max_isolation_window_width is not None and window_widths_seen:
+        logger.info(f"Isolation window widths found: {sorted(window_widths_seen)}")
+    if n_skipped > 0:
+        logger.info(f"Skipping {n_skipped} MS2 spectra with isolation window > {max_isolation_window_width} m/z")
+
+    # Create output directory
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     n_calibrated = 0
 
-    # Find all spectrum elements
-    for spectrum in root.iter(f"{{{ns_ms}}}spectrum"):
-        # Get MS level
-        ms_level = 1
-        for cv_param in spectrum.iter(f"{{{ns_ms}}}cvParam"):
-            if cv_param.get("name") == "ms level":
-                ms_level = int(cv_param.get("value", 1))
-                break
+    # Write with psims
+    with MzMLWriter(str(output_path)) as writer:
+        # Write controlled vocabularies
+        writer.controlled_vocabularies()
 
-        if ms_level != 2:
-            continue
+        # Write minimal file description
+        writer.file_description(
+            file_contents=["MSn spectrum", "centroid spectrum"],
+            source_files=[
+                {
+                    "id": f"source_{input_path.stem}",
+                    "name": input_path.name,
+                    "location": str(input_path.parent),
+                    "file_format": "mzML format",
+                }
+            ],
+        )
 
-        # Extract RT, injection time, and isolation window for calibration
-        rt = 0.0
-        injection_time = 0.0
-        precursor_mz = 0.0
-        precursor_mz_low = 0.0
-        precursor_mz_high = 0.0
-        tic = 0.0
+        # Write software list (include Mars as processing software)
+        writer.software_list(
+            [
+                {"id": "mars", "version": "0.1.3", "params": ["data processing software"]}
+            ]
+        )
 
-        for scan in spectrum.iter(f"{{{ns_ms}}}scan"):
-            for cv_param in scan.iter(f"{{{ns_ms}}}cvParam"):
-                name = cv_param.get("name", "")
-                if name == "scan start time":
-                    rt = float(cv_param.get("value", 0.0))
-                elif name == "ion injection time":
-                    # Convert ms to seconds
-                    injection_time = float(cv_param.get("value", 0.0)) / 1000.0
+        # Write instrument configuration (required by mzML schema before data processing)
+        writer.instrument_configuration_list(
+            [
+                {
+                    "id": "IC1",
+                    "component_list": [],
+                    "params": ["instrument model"],
+                }
+            ]
+        )
 
-        for isolation in spectrum.iter(f"{{{ns_ms}}}isolationWindow"):
-            for cv_param in isolation.iter(f"{{{ns_ms}}}cvParam"):
-                name = cv_param.get("name", "")
-                if name == "isolation window target m/z":
-                    precursor_mz = float(cv_param.get("value", 0.0))
-                elif name == "isolation window lower offset":
-                    lower_offset = float(cv_param.get("value", 0.0))
-                    precursor_mz_low = precursor_mz - lower_offset
-                elif name == "isolation window upper offset":
-                    upper_offset = float(cv_param.get("value", 0.0))
-                    precursor_mz_high = precursor_mz + upper_offset
+        # Write data processing
+        writer.data_processing_list(
+            [
+                {
+                    "id": "mars_calibration",
+                    "processing_methods": [
+                        {
+                            "order": 1,
+                            "software_reference": "mars",
+                            "params": ["m/z calibration"],
+                        }
+                    ],
+                }
+            ]
+        )
 
-        # Skip spectra with wide isolation windows if max_isolation_window_width is set
-        if (
-            max_isolation_window_width is not None
-            and precursor_mz_low > 0
-            and precursor_mz_high > 0
-        ):
-            window_width = precursor_mz_high - precursor_mz_low
-            if window_width > max_isolation_window_width:
-                continue
+        # Start run
+        with writer.run(id="run1"):
+            # Write spectra
+            with writer.spectrum_list(count=len(spectra_data)):
+                for spectrum in spectra_data:
+                    _write_spectrum_with_calibration(
+                        writer,
+                        spectrum,
+                        calibration_func,
+                        max_isolation_window_width,
+                        temperature_data,
+                        acquisition_start_time,
+                    )
+                    # Track calibrations (all MS2 in spectra_data are calibrated since we pre-filtered)
+                    if spectrum.get("ms level", 1) == 2:
+                        n_calibrated += 1
 
-        for cv_param in spectrum.iter(f"{{{ns_ms}}}cvParam"):
-            if cv_param.get("name") == "total ion current":
-                tic = float(cv_param.get("value", 0.0))
+    logger.info(f"Wrote {len(spectra_data)} spectra ({n_calibrated} MS2 calibrated)")
 
-        # Calculate absolute time (seconds since acquisition start + RT in minutes)
-        absolute_time = 0.0
-        if acquisition_start_time is not None:
-            absolute_time = acquisition_start_time + rt * 60.0
 
-        # Look up temperatures at this RT
-        rfa2_temp = 0.0
-        rfc2_temp = 0.0
-        if temperature_data is not None:
-            if "RFA2" in temperature_data:
-                rfa2_temp = temperature_data["RFA2"].get_temperature_at_time(rt)
-            if "RFC2" in temperature_data:
-                rfc2_temp = temperature_data["RFC2"].get_temperature_at_time(rt)
+def _write_spectrum_with_calibration(
+    writer,
+    spectrum: dict,
+    calibration_func,
+    max_isolation_window_width: float | None,
+    temperature_data: dict | None,
+    acquisition_start_time: float | None,
+) -> None:
+    """Write a single spectrum to the mzML writer, applying calibration to MS2.
 
-        # Find m/z and intensity binary data arrays
-        mz_array = None
-        intensity_array = None
-        mz_binary_elem = None
-        mz_compressed = False
-        mz_precision = 64
+    Args:
+        writer: psims MzMLWriter instance
+        spectrum: Pyteomics spectrum dictionary
+        calibration_func: Calibration function for m/z correction
+        max_isolation_window_width: Max isolation window width to calibrate
+        temperature_data: Temperature data dict
+        acquisition_start_time: Acquisition start timestamp
+    """
+    # Extract basic info
+    spectrum_id = spectrum.get("id", f"scan={spectrum.get('index', 0)}")
+    ms_level = spectrum.get("ms level", 1)
+    mz_array = spectrum.get("m/z array", np.array([]))
+    intensity_array = spectrum.get("intensity array", np.array([]))
 
-        for binary_array in spectrum.iter(f"{{{ns_ms}}}binaryDataArray"):
-            is_mz_array = False
-            is_intensity_array = False
+    # Extract scan time
+    scan_time = 0.0
+    scan_list = spectrum.get("scanList", {})
+    scans = scan_list.get("scan", [])
+    if scans:
+        scan_time = scans[0].get("scan start time", 0.0)
 
-            for cv_param in binary_array.iter(f"{{{ns_ms}}}cvParam"):
-                if cv_param.get("name") == "m/z array":
-                    is_mz_array = True
-                elif cv_param.get("name") == "intensity array":
-                    is_intensity_array = True
+    # Extract TIC
+    tic = spectrum.get("total ion current", float(np.sum(intensity_array)))
 
-            # Get binary element and settings
-            binary_elem = binary_array.find(f"{{{ns_ms}}}binary")
-            if binary_elem is None or not binary_elem.text:
-                continue
+    # Check if centroided
+    centroided = spectrum.get("centroid spectrum", False) or spectrum.get(
+        "MS:1000127", False
+    )
 
-            compressed = False
-            precision = 64
+    # Build params list
+    params = [{"ms level": ms_level}]
+    if tic > 0:
+        params.append({"total ion current": tic})
+    if centroided:
+        params.append("centroid spectrum")
+    else:
+        params.append("profile spectrum")
 
-            for cv_param in binary_array.iter(f"{{{ns_ms}}}cvParam"):
-                name = cv_param.get("name", "")
-                if "zlib" in name.lower() or "compression" in name.lower():
-                    compressed = True
-                if "32-bit" in name:
-                    precision = 32
-                elif "64-bit" in name:
-                    precision = 64
+    # Extract injection time if available
+    injection_time = _extract_injection_time(spectrum)
+    if injection_time is not None:
+        # Convert back to milliseconds for mzML
+        params.append({"ion injection time": injection_time * 1000.0})
 
-            data = base64.b64decode(binary_elem.text)
-            if compressed:
-                data = zlib_module.decompress(data)
+    # For MS2, apply calibration and include precursor info
+    precursor_info = None
+    if ms_level == 2:
+        low, high, center = _extract_isolation_window(spectrum)
+        window_width = high - low if high > 0 and low > 0 else 0
 
-            if precision == 64:
-                arr = np.array(struct_module.unpack(f"<{len(data) // 8}d", data))
-            else:
-                arr = np.array(struct_module.unpack(f"<{len(data) // 4}f", data))
+        # Apply calibration unless window is too wide
+        should_calibrate = max_isolation_window_width is None or (
+            window_width <= max_isolation_window_width and window_width > 0
+        )
 
-            if is_mz_array:
-                mz_array = arr
-                mz_binary_elem = binary_elem
-                mz_compressed = compressed
-                mz_precision = precision
-            elif is_intensity_array:
-                intensity_array = arr
+        if should_calibrate and len(mz_array) > 0 and calibration_func is not None:
+            # Calculate absolute time
+            absolute_time = 0.0
+            if acquisition_start_time is not None:
+                absolute_time = acquisition_start_time + scan_time * 60.0
 
-        # Apply calibration if we have m/z array
-        if mz_array is not None and mz_binary_elem is not None:
+            # Look up temperatures
+            rfa2_temp = 0.0
+            rfc2_temp = 0.0
+            if temperature_data is not None:
+                if "RFA2" in temperature_data:
+                    rfa2_temp = temperature_data["RFA2"].get_temperature_at_time(scan_time)
+                if "RFC2" in temperature_data:
+                    rfc2_temp = temperature_data["RFC2"].get_temperature_at_time(scan_time)
+
+            # Build metadata for calibration
             metadata = {
-                "rt": rt,
-                "precursor_mz": precursor_mz,
+                "rt": scan_time,
+                "precursor_mz": center,
                 "tic": tic,
-                "injection_time": injection_time,
+                "injection_time": injection_time if injection_time else 0.0,
                 "absolute_time": absolute_time,
                 "rfa2_temp": rfa2_temp,
                 "rfc2_temp": rfc2_temp,
             }
-            calibrated_mz = calibration_func(metadata, mz_array, intensity_array)
 
-            # Re-encode
-            if mz_precision == 64:
-                new_data = struct_module.pack(f"<{len(calibrated_mz)}d", *calibrated_mz)
-            else:
-                new_data = struct_module.pack(f"<{len(calibrated_mz)}f", *calibrated_mz)
+            # Apply calibration to m/z array
+            mz_array = calibration_func(metadata, mz_array, intensity_array)
 
-            if mz_compressed:
-                new_data = zlib_module.compress(new_data)
+        # Build precursor information
+        if center > 0:
+            # Extract activation info if available
+            activation_params = ["collision-induced dissociation"]  # Default
+            precursor_list = spectrum.get("precursorList", {})
+            precursors = precursor_list.get("precursor", [])
+            if precursors:
+                activation = precursors[0].get("activation", {})
+                # Check for HCD
+                if activation.get("beam-type collision-induced dissociation"):
+                    activation_params = ["beam-type collision-induced dissociation"]
+                # Get collision energy if available
+                collision_energy = activation.get("collision energy")
+                if collision_energy is not None:
+                    activation_params.append({"collision energy": float(collision_energy)})
 
-            mz_binary_elem.text = base64.b64encode(new_data).decode("ascii")
-            n_calibrated += 1
+            precursor_info = {
+                "mz": center,
+                "isolation_window": (low - center if low > 0 else 0.5, center, high - center if high > 0 else 0.5),
+                "activation": activation_params,
+            }
 
-    # Write output
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    tree.write(str(output_path), xml_declaration=True, encoding="utf-8")
-
-    logger.info(f"Calibrated {n_calibrated} MS2 spectra")
+    # Write the spectrum
+    writer.write_spectrum(
+        mz_array,
+        intensity_array,
+        id=spectrum_id,
+        centroided=centroided,
+        scan_start_time=scan_time,
+        params=params,
+        precursor_information=precursor_info,
+    )
 
 
 def get_output_path(input_path: Path | str, output_dir: Path | str | None = None) -> Path:

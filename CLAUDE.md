@@ -34,6 +34,14 @@ The repository uses GitHub Actions for CI/CD, defined in `.github/workflows/`.
 *   **Lint:** `ruff check .`
 *   **Build package:** `python -m build`
 
+## Release Notes
+
+When making bug fixes or improvements during development:
+
+*   **Update the current release notes:** Add any fixes or changes to the current version's release notes file in `release-notes/` (e.g., `RELEASE_NOTES_v0.1.3.md`).
+*   **Be specific:** Document what was fixed and why.
+*   **Group related changes:** Use appropriate sections (Bug Fixes, Changes, New Features, etc.).
+
 ## Style Guidelines
 
 *   **No Emojis:** Do not use emojis in any output, documentation, source code comments, or Jupyter notebooks. Keep all text professional and plain.
