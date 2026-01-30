@@ -4,74 +4,93 @@
 
 ## Overview
 
-This release fixes a critical issue with mzML output files being unreadable by downstream tools. The mzML writer has been completely rewritten to use the psims library, which produces properly indexed mzML files.
+This release fixes critical compatibility issues with mzML output files. The mzML writer has been completely rewritten to use a passthrough approach that preserves all original file metadata, ensuring compatibility with downstream tools like DIA-NN, SeeMS, and MSConvert.
 
 ## Bug Fixes
 
+### Fixed: DIA-NN Compatibility
+
+The previous psims-based writer generated mzML files that DIA-NN could not read. The issue was caused by differences in:
+
+- **CV reference IDs**: psims uses `cvRef="PSI-MS"` while ProteoWizard uses `cvRef="MS"`
+- **Missing metadata**: Thermo nativeID format, instrument configuration, and other CV terms were not preserved
+- **Altered file structure**: The psims writer generated a different XML structure than the original
+
+The new passthrough writer preserves the original file structure byte-for-byte, only modifying the m/z binary data for MS2 spectra.
+
+### Fixed: SeeMS Metadata Display
+
+SeeMS now correctly displays spectrum metadata in separate columns (Controllertype, Controllernumber, Scan) instead of a combined ID field. This is because the original `Thermo nativeID format` CV term is now preserved.
+
 ### Fixed: Broken mzML Output Files
 
-The previous mzML writer used lxml to directly modify XML, which caused several issues:
+The original lxml-based writer caused several issues:
 
-- **Invalid index offsets**: The `<indexList>` section at the end of indexed mzML files contained stale byte offsets after XML rewriting, causing random-access tools to fail
+- **Invalid index offsets**: The `<indexList>` section contained stale byte offsets after XML rewriting
 - **XML formatting changes**: Attribute reordering and whitespace changes could break strict parsers
-
-The new implementation uses the [psims](https://github.com/mobiusklein/psims) library, which is the standard tool for writing PSI-MS format files and handles index generation correctly.
-
-### Fixed: Missing Source File ID in mzML Output
-
-The psims library requires an `id` attribute for source file entries in the mzML metadata. Added proper ID generation for source file references.
-
-### Fixed: mzML Schema Compliance Warning
-
-Added missing `instrumentConfigurationList` section to output mzML files. The mzML schema requires this section before `dataProcessingList`, and psims was emitting a `StateTransitionWarning` without it.
 
 ## Changes
 
-### New mzML Writer Implementation
+### New Passthrough mzML Writer
 
-- **Uses psims `MzMLWriter`** instead of raw lxml for writing mzML files
-- **Produces properly indexed mzML** with correct byte offsets for each spectrum
-- **Preserves all spectrum data**:
-  - MS1 spectra are written unchanged
-  - MS2 spectra have calibrated m/z values; intensity arrays remain unchanged
-  - Scan time, TIC, injection time, and precursor/isolation window information preserved
-  - Activation parameters (CID/HCD, collision energy) preserved
+The new writer uses a fundamentally different approach:
 
-### Wide-Window MS2 Spectra Now Excluded
+1. **Preserves original file exactly** - All metadata, CV terms, XML structure, and formatting are kept unchanged
+2. **Only modifies m/z binary data** - For MS2 spectra, the m/z array is decoded, calibrated, and re-encoded
+3. **Regenerates index** - Byte offsets are recalculated after m/z data changes
+4. **Regenerates checksum** - The SHA-1 file checksum is updated
 
-- When `--max-isolation-window` is specified, MS2 spectra exceeding that width are now **completely excluded** from the output mzML file
-- Previously, these spectra were written unchanged (without calibration)
-- This ensures the output file only contains calibrated data matching the training criteria
+This ensures maximum compatibility with all downstream tools.
 
-### New Dependency
+### Wide-Window MS2 Spectra Handling
 
-- Added `psims>=1.3` to dependencies for mzML writing
+- When `--max-isolation-window` is specified, MS2 spectra exceeding that width are left **unchanged** (not calibrated)
+- The spectra remain in the output file but with original m/z values
+- This differs from the previous behavior where wide-window spectra were excluded entirely
+
+### Dependencies
+
+- Added `lxml` for XML parsing and serialization
+- `psims` is no longer used for mzML writing (still available as a dependency)
 
 ## Technical Details
 
 The new writer workflow:
 
-1. Reads all spectra from input mzML using pyteomics
-2. Filters out MS2 spectra exceeding `--max-isolation-window` (if specified)
-3. For each remaining MS2 spectrum:
-   - Extracts metadata (RT, TIC, injection time, temperatures)
-   - Applies calibration function to m/z array
-   - Writes with calibrated m/z values
-4. MS1 spectra are written unchanged
-5. psims automatically generates the index with correct byte offsets
+1. Reads the original mzML file as raw bytes
+2. Parses the mzML content with lxml while preserving structure
+3. Reads spectrum metadata with pyteomics for calibration calculations
+4. For each MS2 spectrum:
+   - Decodes the m/z binary array (base64 + zlib)
+   - Applies calibration function
+   - Re-encodes with same compression settings
+   - Updates the `encodedLength` attribute
+5. MS1 spectra and chromatograms remain completely unchanged
+6. Regenerates the index with correct byte offsets
+7. Recalculates the SHA-1 file checksum
 
-### Output mzML Metadata
+### Preserved Metadata
 
-The output mzML files include:
+The following are now correctly preserved from the original file:
 
-- Source file reference to the original mzML
-- Mars software entry (version 0.1.3)
-- Data processing record indicating m/z calibration was applied
+- Thermo nativeID format CV term
+- Thermo RAW format CV term
+- Source file references (RAW file path, SHA-1)
+- Instrument configuration (Stellar, serial number)
+- Sample information
+- All spectrum CV parameters (base peak, TIC, filter string, etc.)
+- All chromatograms (TIC, pump pressure, etc.)
+- XML namespaces and schema locations
 
 ## Compatibility
 
 - Fully backward compatible with v0.1.2
-- Output mzML files are now compatible with all standard mzML readers
+- Output mzML files are compatible with:
+  - DIA-NN
+  - SeeMS (ProteoWizard)
+  - MSConvert
+  - Skyline
+  - Other standard mzML readers
 - The calibration model format is unchanged
 
 ## Upgrade Notes

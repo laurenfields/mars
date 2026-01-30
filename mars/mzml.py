@@ -10,11 +10,17 @@ import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from pyteomics import mzml
 
 logger = logging.getLogger(__name__)
+
+# Array name constants for encoding
+MZ_ARRAY = "m/z array"
+INTENSITY_ARRAY = "intensity array"
+TIME_ARRAY = "time array"
 
 
 @dataclass
@@ -298,21 +304,25 @@ def write_calibrated_mzml(
 ) -> None:
     """Write calibrated mzML file with corrected m/z values.
 
-    Uses psims library to write properly indexed mzML files. Reads the original
-    file with pyteomics and writes with psims, modifying only MS2 m/z arrays.
+    Uses a passthrough approach that preserves all original file metadata and structure,
+    only modifying the m/z binary data for MS2 spectra. This ensures compatibility with
+    downstream tools like DIA-NN, SeeMS, and MSConvert.
 
     Args:
         input_path: Path to input mzML file
         output_path: Path for output mzML file
         calibration_func: Function that takes (spectrum_metadata, mz_array, intensity_array)
                          and returns calibrated mz_array
-        max_isolation_window_width: Maximum isolation window width (m/z) to include.
-                                    MS2 spectra with wider windows are excluded from output.
+        max_isolation_window_width: Maximum isolation window width (m/z) to calibrate.
+                                    MS2 spectra with wider windows are left unchanged.
         temperature_data: Dict mapping source names (e.g., 'RFA2', 'RFC2') to TemperatureData objects
     """
+    import base64
+    import hashlib
     import re
+    import zlib
 
-    from psims.mzml import MzMLWriter
+    from lxml import etree
 
     input_path = Path(input_path)
     output_path = Path(output_path)
@@ -334,237 +344,204 @@ def write_calibrated_mzml(
     except Exception as e:
         logger.debug(f"Failed to extract startTimeStamp: {e}")
 
-    # Read all spectra from input file using pyteomics
-    all_spectra = []
+    # Read raw file content
+    with open(input_path, "rb") as f:
+        raw_content = f.read()
+
+    content_str = raw_content.decode("utf-8")
+
+    # Find index section (we'll regenerate it)
+    index_match = re.search(r"\s*<indexList", content_str)
+    if not index_match:
+        raise ValueError("No indexList found - file may not be an indexed mzML")
+
+    main_xml = content_str[: index_match.start()]
+
+    # Find mzML element boundaries
+    mzml_start = main_xml.find("<mzML")
+    mzml_end = main_xml.rfind("</mzML>") + len("</mzML>")
+
+    indexed_header = main_xml[:mzml_start]
+    mzml_content = main_xml[mzml_start:mzml_end]
+    indexed_footer = main_xml[mzml_end:]
+
+    # Parse mzML with lxml
+    root = etree.fromstring(mzml_content.encode("utf-8"))
+    ns = {"ms": "http://psi.hupo.org/ms/mzml"}
+
+    # Get spectrum metadata from pyteomics for calibration
+    spectra_meta = {}
     with mzml.MzML(str(input_path)) as reader:
-        for spectrum in reader:
-            all_spectra.append(spectrum)
+        for spec in reader:
+            spec_id = spec.get("id", "")
+            ms_level = spec.get("ms level", 1)
+            if ms_level == 2:
+                scan_list = spec.get("scanList", {})
+                scans = scan_list.get("scan", [])
+                scan_time = scans[0].get("scan start time", 0.0) if scans else 0.0
 
-    logger.info(f"Read {len(all_spectra)} spectra from input file")
+                # Get isolation window info
+                center, low_off, high_off = 0, 0, 0
+                precursor_list = spec.get("precursorList", {})
+                precursors = precursor_list.get("precursor", [])
+                if precursors:
+                    iso = precursors[0].get("isolationWindow", {})
+                    center = iso.get("isolation window target m/z", 0)
+                    low_off = abs(iso.get("isolation window lower offset", 0))
+                    high_off = abs(iso.get("isolation window upper offset", 0))
 
-    # Filter out wide-window MS2 spectra if max_isolation_window_width is set
-    spectra_data = []
-    n_skipped = 0
-    window_widths_seen = set()
-    for spectrum in all_spectra:
-        ms_level = spectrum.get("ms level", 1)
-        if ms_level == 2 and max_isolation_window_width is not None:
-            low, high, _ = _extract_isolation_window(spectrum)
-            window_width = high - low if high > 0 and low > 0 else 0
-            window_widths_seen.add(round(window_width, 1))
-            if window_width > max_isolation_window_width:
-                n_skipped += 1
-                continue
-        spectra_data.append(spectrum)
+                spectra_meta[spec_id] = {
+                    "scan_time": scan_time,
+                    "isolation_center": center,
+                    "window_width": low_off + high_off,
+                    "intensity": spec.get("intensity array", np.array([])),
+                    "tic": spec.get("total ion current", 0.0),
+                    "injection_time": _extract_injection_time(spec),
+                }
 
-    if max_isolation_window_width is not None and window_widths_seen:
-        logger.info(f"Isolation window widths found: {sorted(window_widths_seen)}")
-    if n_skipped > 0:
-        logger.info(f"Skipping {n_skipped} MS2 spectra with isolation window > {max_isolation_window_width} m/z")
+    logger.info(f"Found {len(spectra_meta)} MS2 spectra")
 
-    # Create output directory
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Helper functions for binary encoding
+    def decode_binary(encoded_data: str, is_zlib: bool, dtype) -> np.ndarray:
+        data = base64.b64decode("".join(encoded_data.split()))
+        if is_zlib:
+            data = zlib.decompress(data)
+        return np.frombuffer(data, dtype=dtype)
 
+    def encode_binary(arr: np.ndarray, is_zlib: bool, dtype) -> str:
+        arr = np.asarray(arr, dtype=dtype)
+        data = arr.tobytes()
+        if is_zlib:
+            data = zlib.compress(data)
+        return base64.b64encode(data).decode("ascii")
+
+    def is_mz_array(elem) -> bool:
+        for cv in elem.findall("ms:cvParam", ns):
+            if cv.get("name") == "m/z array":
+                return True
+        return False
+
+    def get_encoding_info(elem) -> tuple[bool, type]:
+        is_zlib, dtype = False, np.float64
+        for cv in elem.findall("ms:cvParam", ns):
+            name = cv.get("name", "")
+            if "zlib" in name.lower():
+                is_zlib = True
+            if "32-bit" in name:
+                dtype = np.float32
+        return is_zlib, dtype
+
+    # Process spectra in the XML tree
     n_calibrated = 0
+    for spectrum in root.iter("{http://psi.hupo.org/ms/mzml}spectrum"):
+        spec_id = spectrum.get("id")
 
-    # Write with psims
-    with MzMLWriter(str(output_path)) as writer:
-        # Write controlled vocabularies
-        writer.controlled_vocabularies()
+        if spec_id not in spectra_meta:
+            continue  # MS1 spectrum
 
-        # Write minimal file description
-        writer.file_description(
-            file_contents=["MSn spectrum", "centroid spectrum"],
-            source_files=[
-                {
-                    "id": f"source_{input_path.stem}",
-                    "name": input_path.name,
-                    "location": str(input_path.parent),
-                    "file_format": "mzML format",
-                }
-            ],
-        )
+        meta = spectra_meta[spec_id]
 
-        # Write software list (include Mars as processing software)
-        writer.software_list(
-            [
-                {"id": "mars", "version": "0.1.3", "params": ["data processing software"]}
-            ]
-        )
+        # Check window width
+        if max_isolation_window_width and meta["window_width"] > max_isolation_window_width:
+            continue  # Too wide, leave unchanged
 
-        # Write instrument configuration (required by mzML schema before data processing)
-        writer.instrument_configuration_list(
-            [
-                {
-                    "id": "IC1",
-                    "component_list": [],
-                    "params": ["instrument model"],
-                }
-            ]
-        )
+        # Find and modify m/z array
+        for binary_array in spectrum.iter("{http://psi.hupo.org/ms/mzml}binaryDataArray"):
+            if not is_mz_array(binary_array):
+                continue
 
-        # Write data processing
-        writer.data_processing_list(
-            [
-                {
-                    "id": "mars_calibration",
-                    "processing_methods": [
-                        {
-                            "order": 1,
-                            "software_reference": "mars",
-                            "params": ["m/z calibration"],
-                        }
-                    ],
-                }
-            ]
-        )
+            is_zlib, dtype = get_encoding_info(binary_array)
+            binary_elem = binary_array.find("{http://psi.hupo.org/ms/mzml}binary")
 
-        # Start run
-        with writer.run(id="run1"):
-            # Write spectra
-            with writer.spectrum_list(count=len(spectra_data)):
-                for spectrum in spectra_data:
-                    _write_spectrum_with_calibration(
-                        writer,
-                        spectrum,
-                        calibration_func,
-                        max_isolation_window_width,
-                        temperature_data,
-                        acquisition_start_time,
-                    )
-                    # Track calibrations (all MS2 in spectra_data are calibrated since we pre-filtered)
-                    if spectrum.get("ms level", 1) == 2:
-                        n_calibrated += 1
+            if binary_elem is None or not binary_elem.text:
+                continue
 
-    logger.info(f"Wrote {len(spectra_data)} spectra ({n_calibrated} MS2 calibrated)")
+            # Decode m/z array
+            mz_array = decode_binary(binary_elem.text, is_zlib, dtype)
 
-
-def _write_spectrum_with_calibration(
-    writer,
-    spectrum: dict,
-    calibration_func,
-    max_isolation_window_width: float | None,
-    temperature_data: dict | None,
-    acquisition_start_time: float | None,
-) -> None:
-    """Write a single spectrum to the mzML writer, applying calibration to MS2.
-
-    Args:
-        writer: psims MzMLWriter instance
-        spectrum: Pyteomics spectrum dictionary
-        calibration_func: Calibration function for m/z correction
-        max_isolation_window_width: Max isolation window width to calibrate
-        temperature_data: Temperature data dict
-        acquisition_start_time: Acquisition start timestamp
-    """
-    # Extract basic info
-    spectrum_id = spectrum.get("id", f"scan={spectrum.get('index', 0)}")
-    ms_level = spectrum.get("ms level", 1)
-    mz_array = spectrum.get("m/z array", np.array([]))
-    intensity_array = spectrum.get("intensity array", np.array([]))
-
-    # Extract scan time
-    scan_time = 0.0
-    scan_list = spectrum.get("scanList", {})
-    scans = scan_list.get("scan", [])
-    if scans:
-        scan_time = scans[0].get("scan start time", 0.0)
-
-    # Extract TIC
-    tic = spectrum.get("total ion current", float(np.sum(intensity_array)))
-
-    # Check if centroided
-    centroided = spectrum.get("centroid spectrum", False) or spectrum.get(
-        "MS:1000127", False
-    )
-
-    # Build params list
-    params = [{"ms level": ms_level}]
-    if tic > 0:
-        params.append({"total ion current": tic})
-    if centroided:
-        params.append("centroid spectrum")
-    else:
-        params.append("profile spectrum")
-
-    # Extract injection time if available
-    injection_time = _extract_injection_time(spectrum)
-    if injection_time is not None:
-        # Convert back to milliseconds for mzML
-        params.append({"ion injection time": injection_time * 1000.0})
-
-    # For MS2, apply calibration and include precursor info
-    precursor_info = None
-    if ms_level == 2:
-        low, high, center = _extract_isolation_window(spectrum)
-        window_width = high - low if high > 0 and low > 0 else 0
-
-        # Apply calibration unless window is too wide
-        should_calibrate = max_isolation_window_width is None or (
-            window_width <= max_isolation_window_width and window_width > 0
-        )
-
-        if should_calibrate and len(mz_array) > 0 and calibration_func is not None:
             # Calculate absolute time
             absolute_time = 0.0
             if acquisition_start_time is not None:
-                absolute_time = acquisition_start_time + scan_time * 60.0
+                absolute_time = acquisition_start_time + meta["scan_time"] * 60.0
 
             # Look up temperatures
-            rfa2_temp = 0.0
-            rfc2_temp = 0.0
+            rfa2_temp, rfc2_temp = 0.0, 0.0
             if temperature_data is not None:
                 if "RFA2" in temperature_data:
-                    rfa2_temp = temperature_data["RFA2"].get_temperature_at_time(scan_time)
+                    rfa2_temp = temperature_data["RFA2"].get_temperature_at_time(meta["scan_time"])
                 if "RFC2" in temperature_data:
-                    rfc2_temp = temperature_data["RFC2"].get_temperature_at_time(scan_time)
+                    rfc2_temp = temperature_data["RFC2"].get_temperature_at_time(meta["scan_time"])
 
-            # Build metadata for calibration
-            metadata = {
-                "rt": scan_time,
-                "precursor_mz": center,
-                "tic": tic,
-                "injection_time": injection_time if injection_time else 0.0,
+            # Build calibration metadata
+            cal_meta = {
+                "rt": meta["scan_time"],
+                "precursor_mz": meta["isolation_center"],
+                "tic": meta["tic"],
+                "injection_time": meta["injection_time"] if meta["injection_time"] else 0.0,
                 "absolute_time": absolute_time,
                 "rfa2_temp": rfa2_temp,
                 "rfc2_temp": rfc2_temp,
             }
 
-            # Apply calibration to m/z array
-            mz_array = calibration_func(metadata, mz_array, intensity_array)
+            # Apply calibration
+            calibrated_mz = calibration_func(cal_meta, mz_array, meta["intensity"])
 
-        # Build precursor information
-        if center > 0:
-            # Extract activation info if available
-            activation_params = ["collision-induced dissociation"]  # Default
-            precursor_list = spectrum.get("precursorList", {})
-            precursors = precursor_list.get("precursor", [])
-            if precursors:
-                activation = precursors[0].get("activation", {})
-                # Check for HCD
-                if activation.get("beam-type collision-induced dissociation"):
-                    activation_params = ["beam-type collision-induced dissociation"]
-                # Get collision energy if available
-                collision_energy = activation.get("collision energy")
-                if collision_energy is not None:
-                    activation_params.append({"collision energy": float(collision_energy)})
+            # Re-encode with same settings
+            new_binary = encode_binary(calibrated_mz, is_zlib, dtype)
 
-            precursor_info = {
-                "mz": center,
-                "isolation_window": (low - center if low > 0 else 0.5, center, high - center if high > 0 else 0.5),
-                "activation": activation_params,
-            }
+            # Update XML
+            binary_elem.text = new_binary
+            binary_array.set("encodedLength", str(len(new_binary)))
 
-    # Write the spectrum
-    writer.write_spectrum(
-        mz_array,
-        intensity_array,
-        id=spectrum_id,
-        centroided=centroided,
-        scan_start_time=scan_time,
-        params=params,
-        precursor_information=precursor_info,
+            n_calibrated += 1
+
+    logger.info(f"Calibrated {n_calibrated} MS2 spectra")
+
+    # Serialize modified mzML back to string
+    modified_mzml = etree.tostring(root, encoding="unicode")
+
+    # Reconstruct full content (preserving original header/footer)
+    modified_content = indexed_header + modified_mzml + indexed_footer
+    modified_bytes = modified_content.encode("utf-8")
+
+    # Regenerate index with correct byte offsets
+    spectrum_offsets = []
+    for match in re.finditer(rb'<spectrum[^>]+id="([^"]+)"', modified_bytes):
+        spectrum_offsets.append((match.group(1).decode("utf-8"), match.start()))
+
+    chrom_offsets = []
+    for match in re.finditer(rb'<chromatogram[^>]+id="([^"]+)"', modified_bytes):
+        chrom_offsets.append((match.group(1).decode("utf-8"), match.start()))
+
+    # Build index XML
+    index_lines = ["  <indexList count=\"2\">\n", "    <index name=\"spectrum\">\n"]
+    for id_ref, offset in spectrum_offsets:
+        index_lines.append(f'      <offset idRef="{id_ref}">{offset}</offset>\n')
+    index_lines.append("    </index>\n")
+    index_lines.append('    <index name="chromatogram">\n')
+    for id_ref, offset in chrom_offsets:
+        index_lines.append(f'      <offset idRef="{id_ref}">{offset}</offset>\n')
+    index_lines.append("    </index>\n")
+    index_lines.append("  </indexList>\n")
+    index_xml = "".join(index_lines)
+
+    # Calculate indexListOffset and checksum
+    index_list_offset = len(modified_bytes)
+    offset_line = f"  <indexListOffset>{index_list_offset}</indexListOffset>\n"
+
+    checksum_content = modified_bytes + index_xml.encode("utf-8") + offset_line.encode("utf-8")
+    sha1 = hashlib.sha1(checksum_content).hexdigest()
+
+    # Write final output
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    final_content = (
+        modified_content + index_xml + offset_line + f"  <fileChecksum>{sha1}</fileChecksum>\n</indexedmzML>"
     )
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(final_content)
+
+    logger.info(f"Wrote {len(spectrum_offsets)} spectra ({n_calibrated} MS2 calibrated)")
 
 
 def get_output_path(input_path: Path | str, output_dir: Path | str | None = None) -> Path:
