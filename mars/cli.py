@@ -91,7 +91,7 @@ def main():
     "--library",
     type=click.Path(exists=True, dir_okay=False),
     required=False,
-    help="Path to blib spectral library (optional if using --prism-csv)",
+    help="Path to spectral library: blib file or DIA-NN report-lib.parquet",
 )
 @click.option(
     "--output-dir",
@@ -137,6 +137,11 @@ def main():
     help="PRISM Skyline report CSV with Start Time/End Time for RT ranges",
 )
 @click.option(
+    "--diann-report",
+    type=click.Path(exists=True, dir_okay=False),
+    help="DIA-NN report.parquet file (auto-detected if in same folder as library)",
+)
+@click.option(
     "--rt-window",
     type=float,
     default=2.0,
@@ -170,6 +175,7 @@ def calibrate(
     max_isolation_window: float | None,
     temperature_dir: str | None,
     prism_csv: str | None,
+    diann_report: str | None,
     rt_window: float,
     model_path: str | None,
     no_recalibrate: bool,
@@ -220,25 +226,36 @@ def calibrate(
     else:
         model_path = Path(model_path)
 
-    # Load library - prefer PRISM CSV if provided (has theoretical m/z values)
+    # Load library - priority: PRISM CSV > DIA-NN parquet > blib
+    file_filters = [f.stem for f in mzml_files]
+
     if prism_csv:
         from mars.library import load_prism_library
 
-        # Pass all mzML filenames to filter library to only relevant replicates
-        file_filters = [f.stem for f in mzml_files]
         logger.info(f"Loading library from PRISM CSV: {prism_csv}")
         library_entries = load_prism_library(prism_csv, mzml_filename=file_filters)
         logger.info(f"Loaded {len(library_entries)} library entries with theoretical m/z")
-    else:
-        # Fallback to blib (requires --library)
-        if not library:
-            logger.error("Either --library or --prism-csv is required")
-            sys.exit(1)
+    elif library and library.endswith(".parquet"):
+        # DIA-NN parquet library
+        from mars.library import load_diann_library
+
+        logger.info(f"Loading DIA-NN library from: {library}")
+        library_entries = load_diann_library(
+            library,
+            report_parquet=diann_report,
+            mzml_filename=file_filters,
+        )
+        logger.info(f"Loaded {len(library_entries)} library entries from DIA-NN parquet")
+    elif library:
+        # blib file
         from mars.library import load_blib
 
         logger.info(f"Loading spectral library: {library}")
         library_entries = load_blib(library, rt_window=rt_window)
         logger.info(f"Loaded {len(library_entries)} library entries from blib")
+    else:
+        logger.error("A library is required: --library (blib or parquet) or --prism-csv")
+        sys.exit(1)
 
     # Load temperature data if provided
     temperature_data_by_file = {}

@@ -4,7 +4,38 @@
 
 ## Overview
 
-This release fixes critical compatibility issues with mzML output files. The mzML writer has been completely rewritten to use a passthrough approach that preserves all original file metadata, ensuring compatibility with downstream tools like DIA-NN, SeeMS, and MSConvert.
+This release adds support for DIA-NN parquet library files and fixes critical compatibility issues with mzML output files. The mzML writer has been completely rewritten to use a passthrough approach that preserves all original file metadata, ensuring compatibility with downstream tools like DIA-NN, SeeMS, and MSConvert.
+
+## New Features
+
+### DIA-NN Parquet Library Support
+
+Mars now supports loading spectral libraries directly from DIA-NN parquet output files as an alternative to blib or PRISM CSV formats.
+
+**Usage:**
+
+```bash
+mars calibrate --mzml input.mzML --library report-lib.parquet --output calibrated.mzML
+```
+
+**How it works:**
+
+- **Library file (`report-lib.parquet`)**: Contains fragment ion information (m/z, ion types, charges) used for matching
+- **Report file (`report.parquet`)**: Contains per-file retention time windows (RT.Start, RT.Stop) for each precursor
+- The report file is automatically detected in the same directory as the library file
+- If `report.parquet` is not found, Mars will exit with an error
+
+**Optional filtering:**
+
+Use the `--diann-report` option to specify a different report file location:
+
+```bash
+mars calibrate --mzml input.mzML --library report-lib.parquet --diann-report /path/to/report.parquet
+```
+
+**File type detection:**
+
+Mars automatically detects if you accidentally provide the wrong file type (e.g., `report.parquet` instead of `report-lib.parquet`) based on column content, not filename. You'll receive a helpful error message pointing to the correct file.
 
 ## Bug Fixes
 
@@ -85,6 +116,10 @@ The following are now correctly preserved from the original file:
 ## Compatibility
 
 - Fully backward compatible with v0.1.2
+- Supported spectral library formats:
+  - blib (BiblioSpec)
+  - PRISM CSV
+  - DIA-NN parquet (`report-lib.parquet` + `report.parquet`) **NEW**
 - Output mzML files are compatible with:
   - DIA-NN
   - SeeMS (ProteoWizard)

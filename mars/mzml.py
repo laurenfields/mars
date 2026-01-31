@@ -10,7 +10,6 @@ import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 from pyteomics import mzml

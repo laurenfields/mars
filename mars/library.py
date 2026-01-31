@@ -1,7 +1,11 @@
-"""Spectral library loading for blib files.
+"""Spectral library loading for blib and DIA-NN parquet files.
 
-Supports loading Skyline blib (SQLite-based) spectral libraries with
-fragment m/z values calculated from peptide sequences using pyteomics.
+Supports loading:
+- Skyline blib (SQLite-based) spectral libraries
+- DIA-NN parquet output (report-lib.parquet + report.parquet)
+- PRISM Skyline CSV reports
+
+Fragment m/z values can be calculated from peptide sequences using pyteomics.
 """
 
 from __future__ import annotations
@@ -584,4 +588,253 @@ def load_prism_library(
     logger.info(
         f"Loaded {len(entries):,} peptides with {sum(len(e.fragments) for e in entries):,} fragments from PRISM CSV"
     )
+    return entries
+
+
+def load_diann_library(
+    lib_parquet: Path | str,
+    report_parquet: Path | str | None = None,
+    mzml_filename: str | list[str] | None = None,
+) -> list[LibraryEntry]:
+    """Load library from DIA-NN parquet output files.
+
+    Uses report-lib.parquet for fragment m/z values (spectral library) and
+    report.parquet for per-file RT windows (RT.Start, RT.Stop).
+
+    Args:
+        lib_parquet: Path to report-lib.parquet (spectral library with fragments)
+        report_parquet: Path to report.parquet (per-file RT windows).
+                       If None, looks for report.parquet in same directory.
+        mzml_filename: Optional mzML filename(s) to filter RT windows to specific run(s).
+                      Can be a single filename string or a list of filenames.
+
+    Returns:
+        List of LibraryEntry objects with fragments and RT windows
+
+    Raises:
+        FileNotFoundError: If lib_parquet or report.parquet not found
+        ValueError: If required columns are missing from parquet files
+    """
+    import pandas as pd
+
+    lib_path = Path(lib_parquet)
+    logger.info(f"Loading DIA-NN library from {lib_path}")
+
+    if not lib_path.exists():
+        raise FileNotFoundError(f"DIA-NN library parquet not found: {lib_path}")
+
+    # Find report.parquet if not specified
+    if report_parquet is None:
+        # Look in same directory for report.parquet
+        report_path = lib_path.parent / "report.parquet"
+        if not report_path.exists():
+            raise FileNotFoundError(
+                f"DIA-NN report.parquet not found in {lib_path.parent}. "
+                "This file is required for RT windows (RT.Start, RT.Stop). "
+                "Please provide the path via --diann-report or ensure report.parquet "
+                "is in the same directory as the library file."
+            )
+    else:
+        report_path = Path(report_parquet)
+        if not report_path.exists():
+            raise FileNotFoundError(f"DIA-NN report parquet not found: {report_path}")
+
+    # Load library parquet (fragment data)
+    logger.info(f"Loading fragment library from {lib_path}")
+    lib_df = pd.read_parquet(lib_path)
+
+    # Validate required columns in library
+    lib_required = [
+        "Precursor.Id",
+        "Modified.Sequence",
+        "Stripped.Sequence",
+        "Precursor.Charge",
+        "Precursor.Mz",
+        "Product.Mz",
+        "Relative.Intensity",
+        "Fragment.Type",
+        "Fragment.Charge",
+        "Fragment.Series.Number",
+        "Fragment.Loss.Type",
+    ]
+    lib_missing = [c for c in lib_required if c not in lib_df.columns]
+    if lib_missing:
+        # Check if this looks like report.parquet instead of report-lib.parquet
+        report_columns = {"RT.Start", "RT.Stop", "Run", "Q.Value", "PEP"}
+        if report_columns & set(lib_df.columns):
+            raise ValueError(
+                f"The file '{lib_path.name}' appears to be a DIA-NN report file "
+                "(per-file identifications), not a spectral library. "
+                "The spectral library file is typically named 'report-lib.parquet' "
+                "and contains fragment ion information (Product.Mz, Fragment.Type, etc.). "
+                "Please provide the report-lib.parquet file via --library."
+            )
+        raise ValueError(f"Missing required columns in library parquet: {lib_missing}")
+
+    logger.info(
+        f"Loaded {len(lib_df):,} fragments for {lib_df['Precursor.Id'].nunique():,} precursors"
+    )
+
+    # Load report parquet (RT windows)
+    logger.info(f"Loading RT windows from {report_path}")
+    report_df = pd.read_parquet(report_path)
+
+    # Validate required columns in report
+    report_required = ["Precursor.Id", "Run", "RT.Start", "RT.Stop"]
+    report_missing = [c for c in report_required if c not in report_df.columns]
+    if report_missing:
+        raise ValueError(f"Missing required columns in report parquet: {report_missing}")
+
+    logger.info(f"Loaded {len(report_df):,} identifications from report")
+
+    # Filter to specific run(s) if mzml_filename provided
+    if mzml_filename:
+        # Normalize to list
+        if isinstance(mzml_filename, str):
+            filenames = [mzml_filename]
+        else:
+            filenames = list(mzml_filename)
+
+        # Strip common suffixes from mzML filenames to get base names
+        input_base_names = set()
+        for fname in filenames:
+            base_name = fname
+            for suffix in ["_uncalibrated", "-mars", ".mzML", ".mzml", ".raw"]:
+                base_name = base_name.replace(suffix, "")
+            input_base_names.add(base_name)
+
+        # Get unique runs in the report
+        runs = report_df["Run"].astype(str).unique()
+        n_runs = len(runs)
+
+        # Find which runs correspond to our input files
+        matched_runs = []
+        for run in runs:
+            run_str = str(run)
+            # Normalize run name too
+            run_base = run_str
+            for suffix in [".mzML", ".mzml", ".raw", "-mars"]:
+                run_base = run_base.replace(suffix, "")
+
+            for input_name in input_base_names:
+                # Check exact match first, then substring match
+                if run_base == input_name or run_base in input_name or input_name in run_base:
+                    matched_runs.append(run)
+                    break
+
+        n_matched = len(matched_runs)
+
+        if n_matched > 0:
+            if n_matched < n_runs:
+                report_df = report_df[report_df["Run"].isin(matched_runs)]
+                logger.info(
+                    f"Filtered to {n_matched}/{n_runs} runs ({len(report_df):,} identifications)"
+                )
+            else:
+                logger.info(f"All {n_runs} runs in report match input files")
+        else:
+            logger.warning(
+                f"No runs matched! Report contains {n_runs} runs but none matched "
+                f"the {len(input_base_names)} input files. Using all runs."
+            )
+            logger.warning(f"  Input bases: {list(input_base_names)[:3]}")
+            logger.warning(f"  Report runs: {list(runs)[:3]}")
+
+    # Build RT windows lookup: Precursor.Id -> (rt_start, rt_end)
+    # If multiple runs, take the widest RT window across all runs
+    rt_windows: dict[str, tuple[float, float, float]] = {}  # id -> (rt, rt_start, rt_end)
+
+    for _, row in report_df.iterrows():
+        prec_id = row["Precursor.Id"]
+        rt = row.get("RT", 0.0)
+        rt_start = row["RT.Start"]
+        rt_stop = row["RT.Stop"]
+
+        if pd.isna(rt_start) or pd.isna(rt_stop):
+            continue
+
+        if prec_id in rt_windows:
+            # Expand window to include all runs
+            existing_rt, existing_start, existing_end = rt_windows[prec_id]
+            rt_windows[prec_id] = (
+                existing_rt,  # Keep first RT
+                min(existing_start, float(rt_start)),
+                max(existing_end, float(rt_stop)),
+            )
+        else:
+            rt_windows[prec_id] = (float(rt) if pd.notna(rt) else 0.0, float(rt_start), float(rt_stop))
+
+    logger.info(f"Built RT windows for {len(rt_windows):,} precursors")
+
+    # Check for protein IDs column
+    has_protein = "Protein.Ids" in lib_df.columns
+
+    # Group library by precursor to build entries
+    logger.info("Building library entries...")
+    entries: list[LibraryEntry] = []
+
+    grouped = lib_df.groupby("Precursor.Id", sort=False)
+    n_groups = len(grouped)
+    n_with_rt = 0
+
+    for i, (prec_id, group) in enumerate(grouped):
+        if i % 50000 == 0 and i > 0:
+            logger.info(f"  Processed {i:,}/{n_groups:,} precursors...")
+
+        first_row = group.iloc[0]
+
+        # Get RT window from report (if available)
+        rt, rt_start, rt_end = None, None, None
+        if prec_id in rt_windows:
+            rt, rt_start, rt_end = rt_windows[prec_id]
+            n_with_rt += 1
+
+        entry = LibraryEntry(
+            modified_sequence=str(first_row["Modified.Sequence"]),
+            stripped_sequence=str(first_row["Stripped.Sequence"]),
+            precursor_charge=int(first_row["Precursor.Charge"]),
+            precursor_mz=float(first_row["Precursor.Mz"]),
+            rt=rt,
+            rt_start=rt_start,
+            rt_end=rt_end,
+        )
+
+        # Add protein IDs if available
+        if has_protein:
+            protein = first_row["Protein.Ids"]
+            if pd.notna(protein):
+                entry.protein_ids = [str(protein)]
+
+        # Add fragments
+        for row in group.itertuples(index=False):
+            product_mz = row[group.columns.get_loc("Product.Mz")]
+            if pd.isna(product_mz) or product_mz <= 0:
+                continue
+
+            entry.fragments.append(
+                Fragment(
+                    mz=float(product_mz),
+                    intensity=float(row[group.columns.get_loc("Relative.Intensity")]),
+                    ion_type=str(row[group.columns.get_loc("Fragment.Type")]),
+                    ion_number=int(row[group.columns.get_loc("Fragment.Series.Number")]),
+                    charge=int(row[group.columns.get_loc("Fragment.Charge")]),
+                    loss_type=str(row[group.columns.get_loc("Fragment.Loss.Type")]),
+                )
+            )
+
+        if entry.fragments:
+            entries.append(entry)
+
+    n_fragments = sum(len(e.fragments) for e in entries)
+    logger.info(
+        f"Loaded {len(entries):,} peptides with {n_fragments:,} fragments from DIA-NN parquet"
+    )
+    logger.info(f"  {n_with_rt:,} peptides have RT windows from report")
+
+    if n_with_rt == 0:
+        logger.warning(
+            "No peptides have RT windows! Check that report.parquet contains "
+            "matching Precursor.Id values."
+        )
+
     return entries
