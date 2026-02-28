@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:mobiusklein.github.io)",
+      "WebFetch(domain:pyteomics.readthedocs.io)",
+      "WebFetch(domain:github.com)",
+      "Bash(pip install:*)",
+      "Bash(pytest:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(.venv/bin/pip install:*)",
+      "Bash(.venv/bin/python -m pytest:*)",
+      "Bash(.venv/bin/ruff check:*)",
+      "Bash(python:*)",
+      "Bash(.venv/bin/python:*)",
+      "Bash(.venv/bin/pytest:*)",
+      "Bash(ls:*)",
+      "Bash(pip show:*)",
+      "Bash(source:*)",
+      "Bash(mars calibrate:*)",
+      "Bash(python3:*)",
+      "Bash(xxd:*)",
+      "Bash(ruff check:*)",
+      "Bash(echo:*)"
+    ]
+  }
+}

@@ -64,7 +64,28 @@ mars calibrate \
   --output-dir output/
 ```
 
-### Basic Usage
+### With DIA-NN Parquet Output
+
+Use DIA-NN parquet files directly as a spectral library:
+
+```bash
+mars calibrate \
+  --mzml data.mzML \
+  --library report-lib.parquet \
+  --output-dir output/
+```
+
+Mars automatically looks for `report.parquet` in the same directory to get RT windows. If the report file is in a different location:
+
+```bash
+mars calibrate \
+  --mzml data.mzML \
+  --library report-lib.parquet \
+  --diann-report /path/to/report.parquet \
+  --output-dir output/
+```
+
+### Basic Usage (blib)
 
 ```bash
 mars calibrate --mzml data.mzML --library library.blib --output-dir output/
@@ -80,14 +101,36 @@ mars calibrate --mzml "*.mzML" --library library.blib --output-dir output/
 mars calibrate --mzml-dir /path/to/data/ --library library.blib --output-dir output/
 ```
 
+### Applying a Pre-Trained Model
+
+If you've already trained a calibration model and want to apply it to new files without retraining:
+
+```bash
+# Apply existing model to new mzML files
+mars apply --mzml new_data.mzML --model mars_model.pkl --output-dir output/
+
+# Apply to multiple files
+mars apply --mzml "*.mzML" --model mars_model.pkl --output-dir output/
+
+# Apply to all files in a directory
+mars apply --mzml-dir /path/to/data/ --model mars_model.pkl --output-dir output/
+```
+
+This is useful when:
+
+- You want to calibrate files from the same instrument/method without retraining
+- You trained on a subset of files and want to apply to the rest
+- You're reprocessing data with a validated model
+
 ## Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--mzml` | - | Path to mzML file or glob pattern |
 | `--mzml-dir` | - | Directory containing mzML files |
-| `--library` | - | Path to blib spectral library (ignored if using PRISM Skyline Report) |
+| `--library` | - | Path to spectral library: blib file or DIA-NN `report-lib.parquet` |
 | `--prism-csv` | - | PRISM Skyline CSV with Start/End Time columns |
+| `--diann-report` | - | Path to DIA-NN `report.parquet` (auto-detected if in same dir as library) |
 | `--tolerance` | 0.7 | m/z tolerance for matching (Th), ignored if `--tolerance-ppm` is set |
 | `--tolerance-ppm` | - | m/z tolerance for matching in ppm (e.g., 10 for Astral), overrides `--tolerance` |
 | `--min-intensity` | 500 | Minimum peak intensity for matching |
@@ -100,7 +143,8 @@ mars calibrate --mzml-dir /path/to/data/ --library library.blib --output-dir out
 ## RT Window Behavior
 
 - **With `--prism-csv`**: Uses exact `Start Time` and `End Time` from Skyline
-- **Without `--prism-csv`**: Uses ±5 seconds around the blib library RT
+- **With DIA-NN parquet**: Uses `RT.Start` and `RT.Stop` from `report.parquet`
+- **With blib only**: Uses +/-5 seconds around the blib library RT
 
 ## Isolation Window Filtering
 
@@ -207,10 +251,30 @@ calibrator.fit(matches)
 calibrator.save("model.pkl")
 ```
 
+### Using DIA-NN Parquet
+
+```python
+from mars import load_diann_library, read_dia_spectra, match_library_to_spectra, MzCalibrator
+
+# Load DIA-NN library (auto-finds report.parquet in same directory)
+library = load_diann_library("report-lib.parquet")
+
+# Or specify report.parquet explicitly
+library = load_diann_library("report-lib.parquet", report_parquet="/path/to/report.parquet")
+
+# Filter to specific mzML file(s)
+library = load_diann_library("report-lib.parquet", mzml_filename=["sample1.mzML", "sample2.mzML"])
+
+spectra = read_dia_spectra("data.mzML")
+matches = match_library_to_spectra(library, spectra, mz_tolerance=0.2, min_intensity=1500)
+```
+
 ## Requirements
 
-- **Spectral library**: blib format from Skyline with fragment annotations
-- **mzML files**: DIA data from Thermo Stellar (or similar unit resolution instrument)  
+- **Spectral library**: One of the following formats:
+  - blib format from Skyline with fragment annotations
+  - DIA-NN parquet output (`report-lib.parquet` + `report.parquet`)
+- **mzML files**: DIA data from Thermo Stellar (or similar unit resolution instrument)
 - **PRISM CSV** (optional): Skyline report with `Start Time`, `End Time`, `Replicate Name` columns
 
 ## License

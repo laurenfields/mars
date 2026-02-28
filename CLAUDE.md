@@ -38,7 +38,7 @@ The repository uses GitHub Actions for CI/CD, defined in `.github/workflows/`.
 
 When making bug fixes or improvements during development:
 
-*   **Update the current release notes:** Add any fixes or changes to the current version's release notes file in `release-notes/` (e.g., `RELEASE_NOTES_v0.1.3.md`).
+*   **Update the current release notes:** Add any fixes or changes to the current version's release notes file in `release-notes/` (e.g., `RELEASE_NOTES_v0.1.4.md`).
 *   **Be specific:** Document what was fixed and why.
 *   **Group related changes:** Use appropriate sections (Bug Fixes, Changes, New Features, etc.).
 
