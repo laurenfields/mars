@@ -28,31 +28,34 @@ def setup_logging(verbose: bool = False):
 
 
 def find_mzml_files(
-    mzml: str | None = None,
+    mzml: tuple[str, ...] = (),
     mzml_dir: str | None = None,
+    input_files: tuple[str, ...] = (),
 ) -> list[Path]:
-    """Find mzML files from argument or directory.
+    """Find mzML files from arguments, options, or directory.
 
     Args:
-        mzml: Single file path or glob pattern
+        mzml: File paths or glob patterns from --mzml option (can be repeated)
         mzml_dir: Directory containing mzML files
+        input_files: Positional file paths (e.g., from shell-expanded wildcards)
 
     Returns:
         List of mzML file paths
     """
     files = []
 
-    if mzml:
-        # Handle wildcards
-        if "*" in mzml or "?" in mzml:
-            matches = glob.glob(mzml, recursive=True)
+    # Process --mzml options and positional arguments together
+    all_patterns = list(mzml) + list(input_files)
+    for pattern in all_patterns:
+        if "*" in pattern or "?" in pattern:
+            matches = glob.glob(pattern, recursive=True)
             files.extend(Path(m) for m in matches if m.endswith(".mzML"))
         else:
-            path = Path(mzml)
+            path = Path(pattern)
             if path.exists():
                 files.append(path)
             else:
-                logger.error(f"File not found: {mzml}")
+                logger.error(f"File not found: {pattern}")
 
     if mzml_dir:
         dir_path = Path(mzml_dir)
@@ -79,8 +82,11 @@ def main():
 @main.command()
 @click.option(
     "--mzml",
+    "--mzML",
+    "mzml",
+    multiple=True,
     type=str,
-    help="Path to mzML file or glob pattern (e.g., '*.mzML')",
+    help="Path to mzML file(s) or glob pattern (repeatable, e.g., --mzml a.mzML --mzml b.mzML)",
 )
 @click.option(
     "--mzml-dir",
@@ -164,8 +170,9 @@ def main():
     is_flag=True,
     help="Verbose output",
 )
+@click.argument("input_files", nargs=-1, type=click.Path())
 def calibrate(
-    mzml: str | None,
+    mzml: tuple[str, ...],
     mzml_dir: str | None,
     library: str,
     output_dir: str,
@@ -180,6 +187,7 @@ def calibrate(
     model_path: str | None,
     no_recalibrate: bool,
     verbose: bool,
+    input_files: tuple[str, ...] = (),
 ):
     """Learn and apply m/z calibration from spectral library matches.
 
@@ -187,13 +195,19 @@ def calibrate(
     to learn calibration corrections. Outputs recalibrated mzML files named
     {input}-mars.mzML.
 
+    mzML files can also be passed as positional arguments (wildcards expand
+    naturally without quotes).
+
     Examples:
 
         # Single file
         mars calibrate --mzml data.mzML --library lib.blib --output-dir output/
 
-        # Multiple files with wildcard
-        mars calibrate --mzml "*.mzML" --library lib.blib --output-dir output/
+        # Multiple files with wildcard (no quotes needed)
+        mars calibrate --mzml *.mzML --library lib.blib --output-dir output/
+
+        # Positional arguments (also works)
+        mars calibrate *.mzML --library lib.blib --output-dir output/
 
         # All files in directory
         mars calibrate --mzml-dir /data/raw/ --library lib.blib --output-dir output/
@@ -210,9 +224,9 @@ def calibrate(
     from mars.visualization import generate_qc_report
 
     # Find input files
-    mzml_files = find_mzml_files(mzml, mzml_dir)
+    mzml_files = find_mzml_files(mzml, mzml_dir, input_files)
     if not mzml_files:
-        logger.error("No mzML files found. Use --mzml or --mzml-dir.")
+        logger.error("No mzML files found. Use --mzml, --mzml-dir, or pass files as arguments.")
         sys.exit(1)
 
     logger.info(f"Found {len(mzml_files)} mzML files to process")
@@ -361,8 +375,11 @@ def calibrate(
 @main.command()
 @click.option(
     "--mzml",
+    "--mzML",
+    "mzml",
+    multiple=True,
     type=str,
-    help="Path to mzML file or glob pattern",
+    help="Path to mzML file(s) or glob pattern (repeatable)",
 )
 @click.option(
     "--mzml-dir",
@@ -406,8 +423,9 @@ def calibrate(
     is_flag=True,
     help="Verbose output",
 )
+@click.argument("input_files", nargs=-1, type=click.Path())
 def qc(
-    mzml: str | None,
+    mzml: tuple[str, ...],
     mzml_dir: str | None,
     library: str,
     output: str,
@@ -415,12 +433,15 @@ def qc(
     tolerance_ppm: float | None,
     max_isolation_window: float | None,
     verbose: bool,
+    input_files: tuple[str, ...] = (),
 ):
     """Generate QC report without recalibration.
 
     Matches fragments and generates histogram/heatmap plots showing
     the current mass accuracy, but does not train a model or write
     recalibrated mzML files.
+
+    mzML files can also be passed as positional arguments.
     """
     setup_logging(verbose)
 
@@ -432,9 +453,9 @@ def qc(
     from mars.visualization import plot_delta_mz_heatmap, plot_delta_mz_histogram
 
     # Find input files
-    mzml_files = find_mzml_files(mzml, mzml_dir)
+    mzml_files = find_mzml_files(mzml, mzml_dir, input_files)
     if not mzml_files:
-        logger.error("No mzML files found. Use --mzml or --mzml-dir.")
+        logger.error("No mzML files found. Use --mzml, --mzml-dir, or pass files as arguments.")
         sys.exit(1)
 
     output_path = Path(output)
@@ -491,8 +512,11 @@ def qc(
 @main.command()
 @click.option(
     "--mzml",
+    "--mzML",
+    "mzml",
+    multiple=True,
     type=str,
-    help="Path to mzML file or glob pattern",
+    help="Path to mzML file(s) or glob pattern (repeatable)",
 )
 @click.option(
     "--mzml-dir",
@@ -523,18 +547,22 @@ def qc(
     is_flag=True,
     help="Verbose output",
 )
+@click.argument("input_files", nargs=-1, type=click.Path())
 def apply(
-    mzml: str | None,
+    mzml: tuple[str, ...],
     mzml_dir: str | None,
     model: str,
     output_dir: str,
     max_isolation_window: float | None,
     verbose: bool,
+    input_files: tuple[str, ...] = (),
 ):
     """Apply pre-trained calibration model to mzML files.
 
     Use this when you have already trained a model and want to apply
     it to new data without retraining.
+
+    mzML files can also be passed as positional arguments.
     """
     setup_logging(verbose)
 
@@ -542,9 +570,9 @@ def apply(
     from mars.mzml import get_output_path, write_calibrated_mzml
 
     # Find input files
-    mzml_files = find_mzml_files(mzml, mzml_dir)
+    mzml_files = find_mzml_files(mzml, mzml_dir, input_files)
     if not mzml_files:
-        logger.error("No mzML files found. Use --mzml or --mzml-dir.")
+        logger.error("No mzML files found. Use --mzml, --mzml-dir, or pass files as arguments.")
         sys.exit(1)
 
     output_path = Path(output_dir)

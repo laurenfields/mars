@@ -56,13 +56,15 @@ Use a CSV file created using this [Skyline report](Skyline-PRISM-Report/Skyline-
 
 ```bash
 mars calibrate \
-  --mzml data.mzML \
+  --mzML data.mzML \
   --prism-csv prism_report.csv \
   --tolerance 0.2 \
   --min-intensity 500 \
   --max-isolation-window 5.0 \
   --output-dir output/
 ```
+
+> **Note:** Both `--mzml` and `--mzML` are accepted.
 
 ### With DIA-NN Parquet Output
 
@@ -94,8 +96,14 @@ mars calibrate --mzml data.mzML --library library.blib --output-dir output/
 ### Batch Processing
 
 ```bash
-# Multiple files with wildcard
-mars calibrate --mzml "*.mzML" --library library.blib --output-dir output/
+# Multiple files with wildcard (no quotes needed)
+mars calibrate --mzml *.mzML --library library.blib --output-dir output/
+
+# Positional arguments also work (no --mzml flag needed)
+mars calibrate *.mzML --library library.blib --output-dir output/
+
+# Specify files individually
+mars calibrate --mzml a.mzML --mzml b.mzML --library library.blib --output-dir output/
 
 # All files in directory
 mars calibrate --mzml-dir /path/to/data/ --library library.blib --output-dir output/
@@ -109,8 +117,11 @@ If you've already trained a calibration model and want to apply it to new files 
 # Apply existing model to new mzML files
 mars apply --mzml new_data.mzML --model mars_model.pkl --output-dir output/
 
-# Apply to multiple files
-mars apply --mzml "*.mzML" --model mars_model.pkl --output-dir output/
+# Apply to multiple files (no quotes needed)
+mars apply --mzml *.mzML --model mars_model.pkl --output-dir output/
+
+# Or as positional arguments
+mars apply *.mzML --model mars_model.pkl --output-dir output/
 
 # Apply to all files in a directory
 mars apply --mzml-dir /path/to/data/ --model mars_model.pkl --output-dir output/
@@ -126,7 +137,7 @@ This is useful when:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--mzml` | - | Path to mzML file or glob pattern |
+| `--mzml` / `--mzML` | - | Path to mzML file(s) or glob pattern (repeatable) |
 | `--mzml-dir` | - | Directory containing mzML files |
 | `--library` | - | Path to spectral library: blib file or DIA-NN `report-lib.parquet` |
 | `--prism-csv` | - | PRISM Skyline CSV with Start/End Time columns |
